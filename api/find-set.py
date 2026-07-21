@@ -8,14 +8,76 @@ REBRICKABLE_KEY = os.environ.get('REBRICKABLE_API_KEY', '')
 ANTHROPIC_KEY   = os.environ.get('ANTHROPIC_API_KEY', '')
 
 
-def search_rebrickable(query: str) -> list:
-    resp = httpx.get(
-        'https://rebrickable.com/api/v3/lego/sets/',
-        headers={'Authorization': f'key {REBRICKABLE_KEY}'},
-        params={'search': query, 'page_size': 15, 'ordering': '-year'},
-        timeout=10,
-    )
-    return resp.json().get('results', [])
+def _rb_headers() -> dict:
+    return {'Authorization': f'key {REBRICKABLE_KEY}'}
+
+
+def find_theme_ids(query: str) -> list:
+    """
+    Search Rebrickable themes by name and return matching IDs.
+    e.g. "friends" → Lego Friends theme_id(s)
+    """
+    try:
+        resp = httpx.get(
+            'https://rebrickable.com/api/v3/lego/themes/',
+            headers=_rb_headers(),
+            params={'search': query, 'page_size': 5},
+            timeout=8,
+        )
+        return [t['id'] for t in resp.json().get('results', [])]
+    except Exception:
+        return []
+
+
+def search_by_text(query: str) -> list:
+    try:
+        resp = httpx.get(
+            'https://rebrickable.com/api/v3/lego/sets/',
+            headers=_rb_headers(),
+            params={'search': query, 'page_size': 20, 'ordering': '-year'},
+            timeout=10,
+        )
+        return resp.json().get('results', [])
+    except Exception:
+        return []
+
+
+def search_by_theme(theme_id: int) -> list:
+    try:
+        resp = httpx.get(
+            'https://rebrickable.com/api/v3/lego/sets/',
+            headers=_rb_headers(),
+            params={'theme_id': theme_id, 'page_size': 20, 'ordering': '-year'},
+            timeout=10,
+        )
+        return resp.json().get('results', [])
+    except Exception:
+        return []
+
+
+def merged_search(query: str) -> list:
+    """
+    Combine text search + theme search (deduped by set_num).
+    Theme search kicks in when the query matches a Rebrickable theme name,
+    ensuring searches like "Friends" or "City" surface the right sets.
+    """
+    seen: set = set()
+    results: list = []
+
+    def add(sets: list):
+        for s in sets:
+            if s['set_num'] not in seen:
+                results.append(s)
+                seen.add(s['set_num'])
+
+    # 1. Text search
+    add(search_by_text(query))
+
+    # 2. Theme search — enriches when query names a Lego theme
+    for tid in find_theme_ids(query)[:2]:
+        add(search_by_theme(tid))
+
+    return results
 
 
 def rank_with_claude(query: str, sets: list) -> list:
@@ -83,7 +145,7 @@ class handler(BaseHTTPRequestHandler):
             self._json(400, {'error': 'query required'})
             return
 
-        sets   = search_rebrickable(query)
+        sets   = merged_search(query)
         ranked = rank_with_claude(query, sets)
 
         self._json(200, {
