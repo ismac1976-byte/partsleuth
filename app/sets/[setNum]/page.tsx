@@ -30,8 +30,8 @@ export default function SetDetailPage() {
 
   const [set, setSet]             = useState<PSSet | null>(null)
   const [checklist, setChecklist] = useState<ChecklistLine[]>([])
-  const [setLoading, setSetLoad]  = useState(true)
-  const [loadingParts, setLoading] = useState(false)
+  const [isSetLoading, setSetLoad]   = useState(true)
+  const [loadingParts, setLoadingParts] = useState(false)
   const [loadMsg, setLoadMsg]     = useState('')
 
   // Subscribe to the set document
@@ -51,7 +51,7 @@ export default function SetDetailPage() {
 
   // Fetch all parts pages from Rebrickable and batch-write to Firestore
   const loadParts = useCallback(async () => {
-    setLoading(true)
+    setLoadingParts(true)
     try {
       let page = 1
       let loaded = 0
@@ -86,7 +86,7 @@ export default function SetDetailPage() {
     } catch (e) {
       console.error('loadParts error:', e)
     } finally {
-      setLoading(false)
+      setLoadingParts(false)
       setLoadMsg('')
     }
   }, [setNum])
@@ -99,7 +99,7 @@ export default function SetDetailPage() {
     .filter(l => l.quantityFound < l.quantityNeeded)
     .sort((a, b) => b.quantityNeeded - a.quantityNeeded)
 
-  if (setLoading) {
+  if (isSetLoading) {
     return <div className="text-center py-20 text-gray-400">Loading…</div>
   }
   if (!set) {
