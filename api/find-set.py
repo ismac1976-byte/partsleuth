@@ -7,47 +7,61 @@ from urllib.parse import urlparse, parse_qs
 REBRICKABLE_KEY = os.environ.get('REBRICKABLE_API_KEY', '')
 ANTHROPIC_KEY   = os.environ.get('ANTHROPIC_API_KEY', '')
 
+# Words to ignore when splitting a query into candidate theme words
+STOP_WORDS = {'lego', 'the', 'a', 'an', 'of', 'for', 'in', 'and', 'or', 'set', 'sets', 'my'}
+
 
 def _rb_headers() -> dict:
     return {'Authorization': f'key {REBRICKABLE_KEY}'}
 
 
-def find_theme_ids(query: str) -> list:
+def find_theme_and_keywords(query: str) -> tuple:
     """
-    Search Rebrickable themes by name and return matching IDs.
-    e.g. "friends" → Lego Friends theme_id(s)
+    Split the query word-by-word, searching Rebrickable themes for each
+    significant word until we find a matching theme.
+
+    Returns (theme_id_or_None, keyword_string).
+
+    Example: "lego friends cafe" → (494, "cafe")
+             "hogwarts castle"   → (None, "hogwarts castle")
     """
-    try:
-        resp = httpx.get(
-            'https://rebrickable.com/api/v3/lego/themes/',
-            headers=_rb_headers(),
-            params={'search': query, 'page_size': 5},
-            timeout=8,
-        )
-        return [t['id'] for t in resp.json().get('results', [])]
-    except Exception:
-        return []
+    words = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
+
+    for word in words:
+        try:
+            resp = httpx.get(
+                'https://rebrickable.com/api/v3/lego/themes/',
+                headers=_rb_headers(),
+                params={'search': word, 'page_size': 5},
+                timeout=6,
+            )
+            themes = resp.json().get('results', [])
+            # Only accept if the word genuinely appears in the theme name
+            for theme in themes:
+                if word in theme['name'].lower():
+                    # Keywords = everything except the matched word (and "lego")
+                    keywords = ' '.join(
+                        w for w in words if w != word
+                    ).strip()
+                    return theme['id'], keywords or query
+        except Exception:
+            pass
+
+    return None, query
 
 
-def search_by_text(query: str) -> list:
+def search_sets(theme_id, keywords: str, page_size: int = 20) -> list:
+    """Search Rebrickable sets, optionally scoped to a theme."""
+    params = {'page_size': page_size, 'ordering': '-year'}
+    if keywords:
+        params['search'] = keywords
+    if theme_id:
+        params['theme_id'] = theme_id
     try:
         resp = httpx.get(
             'https://rebrickable.com/api/v3/lego/sets/',
             headers=_rb_headers(),
-            params={'search': query, 'page_size': 20, 'ordering': '-year'},
-            timeout=10,
-        )
-        return resp.json().get('results', [])
-    except Exception:
-        return []
-
-
-def search_by_theme(theme_id: int) -> list:
-    try:
-        resp = httpx.get(
-            'https://rebrickable.com/api/v3/lego/sets/',
-            headers=_rb_headers(),
-            params={'theme_id': theme_id, 'page_size': 20, 'ordering': '-year'},
+            params=params,
             timeout=10,
         )
         return resp.json().get('results', [])
@@ -57,9 +71,10 @@ def search_by_theme(theme_id: int) -> list:
 
 def merged_search(query: str) -> list:
     """
-    Combine text search + theme search (deduped by set_num).
-    Theme search kicks in when the query matches a Rebrickable theme name,
-    ensuring searches like "Friends" or "City" surface the right sets.
+    1. Detect a Lego theme in the query (word-by-word).
+    2. If found: search WITHIN that theme using the remaining keywords.
+       This ensures "lego friends cafe" hits Friends sets, not Speed Champions.
+    3. Always fall back to a broad text search too, so non-theme queries still work.
     """
     seen: set = set()
     results: list = []
@@ -70,18 +85,26 @@ def merged_search(query: str) -> list:
                 results.append(s)
                 seen.add(s['set_num'])
 
-    # 1. Text search
-    add(search_by_text(query))
+    theme_id, keywords = find_theme_and_keywords(query)
 
-    # 2. Theme search — enriches when query names a Lego theme
-    for tid in find_theme_ids(query)[:2]:
-        add(search_by_theme(tid))
+    if theme_id:
+        # Targeted: within-theme keyword search  (e.g. Friends + "cafe")
+        add(search_sets(theme_id, keywords))
+        # Broader: recent sets from that theme (catches any that don't match text)
+        add(search_sets(theme_id, ''))
+    else:
+        # No theme detected — plain text search
+        add(search_sets(None, query))
+
+    # Safety net: if still thin, add a plain text search on the keywords
+    if len(results) < 6:
+        add(search_sets(None, keywords if theme_id else query))
 
     return results
 
 
 def rank_with_claude(query: str, sets: list) -> list:
-    """Ask Claude to rank the Rebrickable results by relevance to the query."""
+    """Ask Claude Haiku to pick and order the 6 most relevant results."""
     if not ANTHROPIC_KEY or not sets:
         return sets[:6]
 
@@ -111,14 +134,12 @@ def rank_with_claude(query: str, sets: list) -> list:
             },
             timeout=15,
         )
-        text = resp.json()['content'][0]['text'].strip()
-        ranked_nums = json.loads(text)
+        ranked_nums = json.loads(resp.json()['content'][0]['text'].strip())
         set_map = {s['set_num']: s for s in sets}
         ranked = [set_map[n] for n in ranked_nums if n in set_map]
-        # Append any that Claude missed
-        seen = set(ranked_nums)
+        seen_set = set(ranked_nums)
         for s in sets:
-            if s['set_num'] not in seen:
+            if s['set_num'] not in seen_set:
                 ranked.append(s)
         return ranked[:6]
     except Exception:
