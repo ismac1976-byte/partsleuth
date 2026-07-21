@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    /* Prevent iOS bounce / overscroll on the scan screen */
+    overscroll-behavior: none;
+  }
+  body {
+    @apply bg-gray-50 text-gray-900 antialiased;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-brand-500 text-white font-semibold px-6 py-3 rounded-2xl
+           shadow-md active:scale-95 transition-transform
+           disabled:opacity-50 disabled:pointer-events-none;
+  }
+  .btn-secondary {
+    @apply bg-white text-brand-600 font-semibold px-6 py-3 rounded-2xl
+           border border-brand-500 shadow-sm active:scale-95 transition-transform;
+  }
+  .card {
+    @apply bg-white rounded-2xl shadow-sm border border-gray-100 p-4;
+  }
+}

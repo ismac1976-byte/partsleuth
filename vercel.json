@@ -1,0 +1,12 @@
+{
+  "functions": {
+    "api/scan.py": {
+      "runtime": "python3.9",
+      "maxDuration": 30
+    },
+    "api/rebrickable.py": {
+      "runtime": "python3.9",
+      "maxDuration": 10
+    }
+  }
+}
