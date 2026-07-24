@@ -66,22 +66,27 @@ def _lookup_all_themes(word: str) -> list:
     return []
 
 
-def find_theme_and_keywords(query: str):
+def find_theme_and_keywords(query: str, _log: list = None):
     """
-    Parallel word-by-word theme detection.
-    Picks the theme whose name contains the MOST query words
-    (e.g. "Speed Champions" beats "Speed" for query "speed champions ferrari").
+    Theme detection: searches unigrams AND bigrams against Rebrickable themes.
+    Picks the theme whose name covers the MOST query words.
+    "Speed Champions" (score=2) beats "Speed" (score=1) for "speed champions ferrari".
     Returns (theme_id, remaining_keywords) or (None, cleaned_query).
     """
     words = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
     if not words:
         return None, query
 
-    # Collect all candidate themes from all words in parallel
-    all_candidates: list = []   # list of (id, name_words_set)
+    # Build search phrases: all individual words + all consecutive pairs (bigrams)
+    search_phrases: list = list(words)
+    for i in range(len(words) - 1):
+        search_phrases.append(f'{words[i]} {words[i+1]}')
+
+    # Look up all phrases in parallel
+    all_candidates: list = []
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(words), 4)) as ex:
-            futures = {ex.submit(_lookup_all_themes, w): w for w in words}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(search_phrases), 6)) as ex:
+            futures = {ex.submit(_lookup_all_themes, p): p for p in search_phrases}
             done, _ = concurrent.futures.wait(futures, timeout=_RB_TIMEOUT + 2)
             for fut in done:
                 try:
@@ -92,31 +97,30 @@ def find_theme_and_keywords(query: str):
     except Exception:
         pass
 
+    if _log is not None:
+        _log.append(f'theme_candidates: {[(tid, sorted(tw)) for tid, tw in all_candidates[:6]]}')
+
     if not all_candidates:
         return None, ' '.join(words)
 
-    # Deduplicate by theme_id, keeping unique entries
+    # Deduplicate by theme_id
     seen_ids: set = set()
-    unique_candidates = []
+    unique: list = []
     for tid, twords in all_candidates:
         if tid not in seen_ids:
             seen_ids.add(tid)
-            unique_candidates.append((tid, twords))
+            unique.append((tid, twords))
 
-    # Pick the theme whose name shares the MOST words with the query
-    # (tie-break: prefer the one that covers the most query words)
-    def score(candidate):
-        _, twords = candidate
-        return sum(1 for w in words if w in twords)
+    # Pick theme with highest count of query words in its name
+    def score(c):
+        return sum(1 for w in words if w in c[1])
 
-    best_theme_id, best_theme_words = max(unique_candidates, key=score)
-    best_score = score((best_theme_id, best_theme_words))
-
-    if best_score == 0:
+    best_id, best_words = max(unique, key=score)
+    if score((best_id, best_words)) == 0:
         return None, ' '.join(words)
 
-    remaining = [w for w in words if w not in best_theme_words]
-    return best_theme_id, ' '.join(remaining).strip()
+    remaining = [w for w in words if w not in best_words]
+    return best_id, ' '.join(remaining).strip()
 
 
 # ── Rebrickable set search ───────────────────────────────────────────────────
@@ -155,8 +159,8 @@ def merged_search(query: str, _debug: list = None) -> list:
     if results:
         return results
 
-    # 2. Parallel theme detection
-    theme_id, keywords = find_theme_and_keywords(query)
+    # 2. Theme detection (unigrams + bigrams, picks best-scoring theme)
+    theme_id, keywords = find_theme_and_keywords(query, _log=_debug)
     if _debug is not None:
         _debug.append(f'theme_id={theme_id}, keywords="{keywords}"')
 
