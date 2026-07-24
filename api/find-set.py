@@ -317,7 +317,9 @@ class handler(BaseHTTPRequestHandler):
             return
 
         _debug_log: list = [] if debug else None
-        sets   = merged_search(query, _debug_log)
+        sets = merged_search(query, _debug_log)
+        # Filter out books, stickers, backpacks (0 or near-0 parts)
+        sets = [s for s in sets if s.get('num_parts', 0) >= 10]
         ranked = rank_with_claude(query, sets)
 
         resp = {
