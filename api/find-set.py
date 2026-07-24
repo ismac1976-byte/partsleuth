@@ -52,51 +52,71 @@ def direct_set_lookup(query: str) -> list:
 
 # ── Theme detection ──────────────────────────────────────────────────────────
 
-def _lookup_theme(word: str):
-    """Check if a word matches a theme name. Returns (id, name_words_set) or None."""
+def _lookup_all_themes(word: str) -> list:
+    """Returns ALL themes whose names contain this word: [(id, name_words_set), ...]"""
     try:
         data = _rb_get('themes/', {'search': word, 'page_size': 10})
-        for theme in data.get('results', []):
-            if word in theme['name'].lower():
-                return (theme['id'], set(theme['name'].lower().split()))
+        return [
+            (t['id'], set(t['name'].lower().split()))
+            for t in data.get('results', [])
+            if word in t['name'].lower()
+        ]
     except Exception:
         pass
-    return None
+    return []
 
 
 def find_theme_and_keywords(query: str):
     """
     Parallel word-by-word theme detection.
+    Picks the theme whose name contains the MOST query words
+    (e.g. "Speed Champions" beats "Speed" for query "speed champions ferrari").
     Returns (theme_id, remaining_keywords) or (None, cleaned_query).
     """
     words = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
     if not words:
         return None, query
 
-    theme_results = {}
+    # Collect all candidate themes from all words in parallel
+    all_candidates: list = []   # list of (id, name_words_set)
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(words), 4)) as ex:
-            futures = {ex.submit(_lookup_theme, w): w for w in words}
-            # Give each thread its full timeout + buffer
+            futures = {ex.submit(_lookup_all_themes, w): w for w in words}
             done, _ = concurrent.futures.wait(futures, timeout=_RB_TIMEOUT + 2)
             for fut in done:
-                w = futures[fut]
                 try:
-                    result = fut.result()
-                    if result:
-                        theme_results[w] = result
+                    themes = fut.result()
+                    all_candidates.extend(themes)
                 except Exception:
                     pass
     except Exception:
-        pass  # If threading fails, fall through to text search
+        pass
 
-    for word in words:
-        if word in theme_results:
-            theme_id, theme_name_words = theme_results[word]
-            remaining = [w for w in words if w not in theme_name_words]
-            return theme_id, ' '.join(remaining).strip()
+    if not all_candidates:
+        return None, ' '.join(words)
 
-    return None, ' '.join(words)
+    # Deduplicate by theme_id, keeping unique entries
+    seen_ids: set = set()
+    unique_candidates = []
+    for tid, twords in all_candidates:
+        if tid not in seen_ids:
+            seen_ids.add(tid)
+            unique_candidates.append((tid, twords))
+
+    # Pick the theme whose name shares the MOST words with the query
+    # (tie-break: prefer the one that covers the most query words)
+    def score(candidate):
+        _, twords = candidate
+        return sum(1 for w in words if w in twords)
+
+    best_theme_id, best_theme_words = max(unique_candidates, key=score)
+    best_score = score((best_theme_id, best_theme_words))
+
+    if best_score == 0:
+        return None, ' '.join(words)
+
+    remaining = [w for w in words if w not in best_theme_words]
+    return best_theme_id, ' '.join(remaining).strip()
 
 
 # ── Rebrickable set search ───────────────────────────────────────────────────
