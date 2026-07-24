@@ -63,6 +63,7 @@ def find_theme_and_keywords(query: str, _log: list = None):
     """
     Theme detection with bigram search.
     Only uses a theme if ALL meaningful words in the theme name appear in the query.
+    Prevents "speed" -> "Speed Slammers" for query "speed champions ferrari".
     """
     words = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
     if not words:
@@ -157,15 +158,13 @@ def merged_search(query: str, _debug: list = None) -> list:
             search_tasks.append((theme_id, keywords, 20, 'theme+kw'))
         search_tasks.append((theme_id, '', 20, 'broad_theme'))
     else:
-        # No theme found: search each meaningful query word individually in parallel.
-        # >= 4 chars catches short but important words like "cafe", "city", "fire".
+        # No theme: search each meaningful word individually in parallel.
+        # >= 4 chars catches short but specific words like "cafe", "city", "fire".
         extra_words = [w for w in query.lower().split()
                        if w not in STOP_WORDS and len(w) >= 4]
         for word in extra_words:
             search_tasks.append((None, word, 10, f'word_{word}'))
-    # Always text-search the full query
     search_tasks.append((None, query, 15, 'full_text'))
-    # And keywords alone if they differ from the full query
     if keywords and keywords not in (query, ' '.join(
         w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2
     )):
@@ -188,7 +187,6 @@ def merged_search(query: str, _debug: list = None) -> list:
     except Exception:
         pass
 
-    # Fallback: n-gram phrase searches when < 8 results
     if len(results) < 8:
         words = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
         tried: list = []
@@ -212,10 +210,16 @@ def merged_search(query: str, _debug: list = None) -> list:
 
 
 def _pre_sort(sets: list, query: str) -> list:
+    """
+    Sort by whole-word match count (desc) then year (desc).
+    Uses word-boundary regex so "speed" does NOT match inside "landspeeder",
+    preventing fuzzy noise from pulling irrelevant sets to the top.
+    """
     qwords = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
+    patterns = [re.compile(r'\b' + re.escape(w) + r'\b') for w in qwords]
     def sort_key(s):
         name = s['name'].lower()
-        matches = sum(1 for w in qwords if w in name)
+        matches = sum(1 for p in patterns if p.search(name))
         return (matches, s.get('year', 0))
     return sorted(sets, key=sort_key, reverse=True)
 
