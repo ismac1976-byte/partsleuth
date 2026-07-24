@@ -195,10 +195,15 @@ def rank_with_claude(query: str, sets: list) -> list:
         for s in sets[:25]
     )
     prompt = (
-        f'A LEGO fan is searching for: "{query}"\n\n'
-        f'Rebrickable results:\n{set_lines}\n\n'
-        'Return ONLY a JSON array of the 8 most relevant set numbers in relevance order. '
-        'Prefer exact name matches over theme-only matches. '
+        f'A LEGO fan searched for: "{query}"\n\n'
+        f'Candidate sets from Rebrickable:\n{set_lines}\n\n'
+        'Task: rank these sets by relevance to the search query.\n'
+        'Rules:\n'
+        '- Sets whose names contain ALL the key search words rank highest\n'
+        '- Sets whose names contain MOST of the key search words rank next\n'
+        '- Prefer newer sets (higher year) when names are equally relevant\n'
+        '- Ignore sets with names that share only a single common word\n'
+        'Return ONLY a JSON array of up to 8 set_nums in ranked order.\n'
         'Example: ["75969-1","71043-1"]. No explanation, no markdown.'
     )
 
