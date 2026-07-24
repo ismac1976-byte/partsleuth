@@ -12,17 +12,22 @@ ANTHROPIC_KEY   = os.environ.get('ANTHROPIC_API_KEY', '')
 STOP_WORDS = {'lego', 'the', 'a', 'an', 'of', 'for', 'in', 'and', 'or',
                'set', 'sets', 'my', 'i', 'is', 'are', 'with', 'by', 'to'}
 
-# Shared httpx client (reuse connections)
-_client = None
-
-def _get_client():
-    global _client
-    if _client is None:
-        _client = httpx.Client(timeout=httpx.Timeout(5.0), follow_redirects=True)
-    return _client
+# Use a longer timeout to handle cold-start DNS+TLS latency
+_RB_TIMEOUT = 8.0
 
 def _rb_headers() -> dict:
     return {'Authorization': f'key {REBRICKABLE_KEY}'}
+
+def _rb_get(path: str, params: dict) -> dict:
+    """One-shot Rebrickable GET — no shared client to avoid threading issues."""
+    resp = httpx.get(
+        f'https://rebrickable.com/api/v3/lego/{path}',
+        headers=_rb_headers(),
+        params=params,
+        timeout=_RB_TIMEOUT,
+        follow_redirects=True,
+    )
+    return resp.json()
 
 
 # ── Direct set-number lookup ─────────────────────────────────────────────────
@@ -33,9 +38,10 @@ def direct_set_lookup(query: str) -> list:
         return []
     set_num = m.group(1) + '-' + (m.group(2) or '1')
     try:
-        resp = _get_client().get(
+        resp = httpx.get(
             f'https://rebrickable.com/api/v3/lego/sets/{set_num}/',
             headers=_rb_headers(),
+            timeout=_RB_TIMEOUT,
         )
         if resp.status_code == 200:
             return [resp.json()]
@@ -47,14 +53,10 @@ def direct_set_lookup(query: str) -> list:
 # ── Theme detection ──────────────────────────────────────────────────────────
 
 def _lookup_theme(word: str):
-    """Check if a single word matches a Rebrickable theme. Returns (id, name_words) or None."""
+    """Check if a word matches a theme name. Returns (id, name_words_set) or None."""
     try:
-        resp = _get_client().get(
-            'https://rebrickable.com/api/v3/lego/themes/',
-            headers=_rb_headers(),
-            params={'search': word, 'page_size': 10},
-        )
-        for theme in resp.json().get('results', []):
+        data = _rb_get('themes/', {'search': word, 'page_size': 10})
+        for theme in data.get('results', []):
             if word in theme['name'].lower():
                 return (theme['id'], set(theme['name'].lower().split()))
     except Exception:
@@ -65,31 +67,29 @@ def _lookup_theme(word: str):
 def find_theme_and_keywords(query: str):
     """
     Parallel word-by-word theme detection.
-    Removes ALL words in the matched theme name from keywords.
-
-      "lego friends cafe"         → (friends_id, "cafe")
-      "harry potter diagon alley" → (hp_id, "diagon alley")
-      "star wars at-at"           → (sw_id, "at-at")
-      "hogwarts castle"           → (None, "hogwarts castle")
+    Returns (theme_id, remaining_keywords) or (None, cleaned_query).
     """
     words = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
     if not words:
         return None, query
 
-    # Check all words for theme matches IN PARALLEL
     theme_results = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(words), 4)) as ex:
-        futures = {ex.submit(_lookup_theme, w): w for w in words}
-        for fut in concurrent.futures.as_completed(futures, timeout=6):
-            w = futures[fut]
-            try:
-                result = fut.result()
-                if result:
-                    theme_results[w] = result
-            except Exception:
-                pass
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(words), 4)) as ex:
+            futures = {ex.submit(_lookup_theme, w): w for w in words}
+            # Give each thread its full timeout + buffer
+            done, _ = concurrent.futures.wait(futures, timeout=_RB_TIMEOUT + 2)
+            for fut in done:
+                w = futures[fut]
+                try:
+                    result = fut.result()
+                    if result:
+                        theme_results[w] = result
+                except Exception:
+                    pass
+    except Exception:
+        pass  # If threading fails, fall through to text search
 
-    # Use the FIRST word (in original order) that matched a theme
     for word in words:
         if word in theme_results:
             theme_id, theme_name_words = theme_results[word]
@@ -108,58 +108,78 @@ def search_sets(theme_id=None, keywords='', page_size=20) -> list:
     if keywords:
         params['search'] = keywords
     try:
-        resp = _get_client().get(
-            'https://rebrickable.com/api/v3/lego/sets/',
-            headers=_rb_headers(),
-            params=params,
-        )
-        return resp.json().get('results', [])
+        data = _rb_get('sets/', params)
+        return data.get('results', [])
     except Exception:
         return []
 
 
 # ── Merged search ────────────────────────────────────────────────────────────
 
-def merged_search(query: str) -> list:
+def merged_search(query: str, _debug: list = None) -> list:
     seen: set  = set()
     results: list = []
 
-    def add(sets: list):
+    def add(sets: list, label: str = ''):
+        added = 0
         for s in sets:
             if s['set_num'] not in seen:
                 results.append(s)
                 seen.add(s['set_num'])
+                added += 1
+        if _debug is not None:
+            _debug.append(f'{label}: +{added} (total {len(results)})')
 
     # 1. Direct set-number lookup
-    add(direct_set_lookup(query))
+    add(direct_set_lookup(query), 'direct_lookup')
     if results:
         return results
 
-    # 2. Theme detection (parallel word-by-word)
+    # 2. Parallel theme detection
     theme_id, keywords = find_theme_and_keywords(query)
+    if _debug is not None:
+        _debug.append(f'theme_id={theme_id}, keywords="{keywords}"')
 
-    # 3. Build all searches to run in parallel
-    search_tasks = []
+    # 3. Build parallel search tasks
+    search_tasks: list = []
     if theme_id:
         if keywords:
-            search_tasks.append((theme_id, keywords, 20))   # themed + keyword
-        search_tasks.append((theme_id, '', 20))              # broad theme
-    # Always include text searches
-    search_tasks.append((None, query, 15))                   # full query text
-    if keywords and keywords != query and keywords != ' '.join(
+            search_tasks.append((theme_id, keywords, 20, f'theme+kw'))
+        search_tasks.append((theme_id, '', 20, 'broad_theme'))
+    # Always text-search the full query
+    search_tasks.append((None, query, 15, 'full_text'))
+    # And keywords alone if they differ from the full query
+    if keywords and keywords not in (query, ' '.join(
         w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2
-    ):
-        search_tasks.append((None, keywords, 10))            # keywords only
+    )):
+        search_tasks.append((None, keywords, 10, 'kw_only'))
 
-    # 4. Run all searches in PARALLEL
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(search_tasks)) as ex:
-        futures = [ex.submit(search_sets, *task) for task in search_tasks]
-        # Collect in submission order (maintain priority)
-        for fut in futures:
-            try:
-                add(fut.result(timeout=10))
-            except Exception:
-                pass
+    # 4. Run all in parallel
+    def run_search(args):
+        tid, kw, ps, lbl = args
+        return search_sets(tid, kw, ps), lbl
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(search_tasks), 1)) as ex:
+            futures = [ex.submit(run_search, t) for t in search_tasks]
+            done, _ = concurrent.futures.wait(futures, timeout=12)
+            for fut in done:
+                try:
+                    sets, label = fut.result()
+                    add(sets, label)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # 5. Fallback: plain text searches if still empty
+    if not results:
+        words = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
+        for word in words:
+            if len(word) > 3:
+                add(search_sets(None, word, 10), f'word_{word}')
+        if _debug is not None:
+            _debug.append(f'fallback_words: checked {[w for w in words if len(w) > 3]}')
 
     return results
 
@@ -178,7 +198,8 @@ def rank_with_claude(query: str, sets: list) -> list:
         f'A LEGO fan is searching for: "{query}"\n\n'
         f'Rebrickable results:\n{set_lines}\n\n'
         'Return ONLY a JSON array of the 8 most relevant set numbers in relevance order. '
-        'Prefer exact matches. Example: ["75969-1","71043-1"]. No explanation, no markdown.'
+        'Prefer exact name matches over theme-only matches. '
+        'Example: ["75969-1","71043-1"]. No explanation, no markdown.'
     )
 
     try:
@@ -228,19 +249,24 @@ class handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
         query  = params.get('q', [''])[0].strip()
+        debug  = 'debug' in params
 
         if not query:
             self._json(400, {'error': 'query required'})
             return
 
-        sets   = merged_search(query)
+        _debug_log: list = [] if debug else None
+        sets   = merged_search(query, _debug_log)
         ranked = rank_with_claude(query, sets)
 
-        self._json(200, {
+        resp = {
             'results':       [format_set(s) for s in ranked],
             'claude_ranked': bool(ANTHROPIC_KEY),
             'total_found':   len(sets),
-        })
+        }
+        if debug:
+            resp['debug'] = _debug_log
+        self._json(200, resp)
 
     def _json(self, status: int, data: dict):
         body = json.dumps(data).encode()
