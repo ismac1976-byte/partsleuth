@@ -224,13 +224,31 @@ def merged_search(query: str, _debug: list = None) -> list:
 
 # ── Claude ranking ───────────────────────────────────────────────────────────
 
+def _pre_sort(sets: list, query: str) -> list:
+    """
+    Pre-sort the result pool before showing to Claude.
+    Primary key: number of query words found in the set name (higher = better).
+    Secondary key: year (newer = better).
+    This ensures Ferrari sets appear before Slammer Stunt Bikes for "speed champions ferrari".
+    """
+    qwords = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
+    def sort_key(s):
+        name = s['name'].lower()
+        matches = sum(1 for w in qwords if w in name)
+        return (matches, s.get('year', 0))
+    return sorted(sets, key=sort_key, reverse=True)
+
+
 def rank_with_claude(query: str, sets: list) -> list:
     if not ANTHROPIC_KEY or not sets:
-        return sets[:8]
+        return _pre_sort(sets, query)[:8]
+
+    # Pre-sort so Claude sees the most-relevant sets first (within its 25-set window)
+    pre_sorted = _pre_sort(sets, query)
 
     set_lines = '\n'.join(
         f"{s['set_num']}: {s['name']} ({s['year']}, {s['num_parts']} pieces)"
-        for s in sets[:25]
+        for s in pre_sorted[:25]
     )
     prompt = (
         f'A LEGO fan searched for: "{query}"\n\n'
@@ -265,12 +283,12 @@ def rank_with_claude(query: str, sets: list) -> list:
         set_map = {s['set_num']: s for s in sets}
         ranked = [set_map[n] for n in ranked_nums if n in set_map]
         seen_r = {s['set_num'] for s in ranked}
-        for s in sets:
+        for s in pre_sorted:
             if s['set_num'] not in seen_r:
                 ranked.append(s)
         return ranked[:8]
     except Exception:
-        return sets[:8]
+        return pre_sorted[:8]
 
 
 # ── Format ───────────────────────────────────────────────────────────────────
