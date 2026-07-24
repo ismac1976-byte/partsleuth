@@ -12,14 +12,12 @@ ANTHROPIC_KEY   = os.environ.get('ANTHROPIC_API_KEY', '')
 STOP_WORDS = {'lego', 'the', 'a', 'an', 'of', 'for', 'in', 'and', 'or',
                'set', 'sets', 'my', 'i', 'is', 'are', 'with', 'by', 'to'}
 
-# Use a longer timeout to handle cold-start DNS+TLS latency
 _RB_TIMEOUT = 8.0
 
 def _rb_headers() -> dict:
     return {'Authorization': f'key {REBRICKABLE_KEY}'}
 
 def _rb_get(path: str, params: dict) -> dict:
-    """One-shot Rebrickable GET — no shared client to avoid threading issues."""
     resp = httpx.get(
         f'https://rebrickable.com/api/v3/lego/{path}',
         headers=_rb_headers(),
@@ -29,8 +27,6 @@ def _rb_get(path: str, params: dict) -> dict:
     )
     return resp.json()
 
-
-# ── Direct set-number lookup ─────────────────────────────────────────────────
 
 def direct_set_lookup(query: str) -> list:
     m = re.match(r'^(\d{4,6})[-\s]?(\d?)$', query.strip())
@@ -50,10 +46,7 @@ def direct_set_lookup(query: str) -> list:
     return []
 
 
-# ── Theme detection ──────────────────────────────────────────────────────────
-
 def _lookup_all_themes(word: str) -> list:
-    """Returns ALL themes whose names contain this word: [(id, name_words_set), ...]"""
     try:
         data = _rb_get('themes/', {'search': word, 'page_size': 10})
         return [
@@ -68,22 +61,18 @@ def _lookup_all_themes(word: str) -> list:
 
 def find_theme_and_keywords(query: str, _log: list = None):
     """
-    Theme detection: searches unigrams AND bigrams against Rebrickable themes.
-    Picks the theme whose name covers the MOST query words.
+    Theme detection with bigram search.
     Only uses a theme if ALL meaningful words in the theme name appear in the query
-    (prevents "speed" matching "Speed Slammers" for query "speed champions ferrari").
-    Returns (theme_id, remaining_keywords) or (None, cleaned_query).
+    (prevents "speed" matching "Speed Slammers" for "speed champions ferrari").
     """
     words = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
     if not words:
         return None, query
 
-    # Build search phrases: all individual words + all consecutive pairs (bigrams)
     search_phrases: list = list(words)
     for i in range(len(words) - 1):
         search_phrases.append(f'{words[i]} {words[i+1]}')
 
-    # Look up all phrases in parallel
     all_candidates: list = []
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(search_phrases), 6)) as ex:
@@ -104,7 +93,6 @@ def find_theme_and_keywords(query: str, _log: list = None):
     if not all_candidates:
         return None, ' '.join(words)
 
-    # Deduplicate by theme_id
     seen_ids: set = set()
     unique: list = []
     for tid, twords in all_candidates:
@@ -112,13 +100,11 @@ def find_theme_and_keywords(query: str, _log: list = None):
             seen_ids.add(tid)
             unique.append((tid, twords))
 
-    # Score = number of query words that appear in the theme name
     def score(c):
         return sum(1 for w in words if w in c[1])
 
-    # Only accept themes where every MEANINGFUL word in the theme name
-    # also appears in the query.  This prevents "speed" -> "Speed Slammers"
-    # (theme has "slammers" which is NOT in the query "speed champions ferrari").
+    # Only accept themes where every meaningful word in the theme name
+    # also appears in the query. Prevents "speed" -> "Speed Slammers".
     query_word_set = set(words)
     def all_meaningful_in_query(c):
         meaningful = {w for w in c[1] if w not in STOP_WORDS and len(w) > 2}
@@ -129,12 +115,9 @@ def find_theme_and_keywords(query: str, _log: list = None):
         return None, ' '.join(words)
 
     best_id, best_words = max(valid, key=score)
-
     remaining = [w for w in words if w not in best_words]
     return best_id, ' '.join(remaining).strip()
 
-
-# ── Rebrickable set search ───────────────────────────────────────────────────
 
 def search_sets(theme_id=None, keywords='', page_size=20) -> list:
     params: dict = {'page_size': page_size, 'ordering': '-year'}
@@ -148,8 +131,6 @@ def search_sets(theme_id=None, keywords='', page_size=20) -> list:
     except Exception:
         return []
 
-
-# ── Merged search ────────────────────────────────────────────────────────────
 
 def merged_search(query: str, _debug: list = None) -> list:
     seen: set  = set()
@@ -165,22 +146,27 @@ def merged_search(query: str, _debug: list = None) -> list:
         if _debug is not None:
             _debug.append(f'{label}: +{added} (total {len(results)})')
 
-    # 1. Direct set-number lookup
     add(direct_set_lookup(query), 'direct_lookup')
     if results:
         return results
 
-    # 2. Theme detection (unigrams + bigrams, picks best-scoring valid theme)
     theme_id, keywords = find_theme_and_keywords(query, _log=_debug)
     if _debug is not None:
         _debug.append(f'theme_id={theme_id}, keywords="{keywords}"')
 
-    # 3. Build parallel search tasks
     search_tasks: list = []
     if theme_id:
         if keywords:
-            search_tasks.append((theme_id, keywords, 20, f'theme+kw'))
+            search_tasks.append((theme_id, keywords, 20, 'theme+kw'))
         search_tasks.append((theme_id, '', 20, 'broad_theme'))
+    else:
+        # No theme found: search each meaningful query word individually in parallel.
+        # Ensures brand/model words like "ferrari" are searched even when the
+        # full-text query returns only fuzzy unrelated matches.
+        extra_words = [w for w in query.lower().split()
+                       if w not in STOP_WORDS and len(w) > 4]
+        for word in extra_words:
+            search_tasks.append((None, word, 10, f'word_{word}'))
     # Always text-search the full query
     search_tasks.append((None, query, 15, 'full_text'))
     # And keywords alone if they differ from the full query
@@ -189,7 +175,6 @@ def merged_search(query: str, _debug: list = None) -> list:
     )):
         search_tasks.append((None, keywords, 10, 'kw_only'))
 
-    # 4. Run all in parallel
     def run_search(args):
         tid, kw, ps, lbl = args
         return search_sets(tid, kw, ps), lbl
@@ -207,7 +192,7 @@ def merged_search(query: str, _debug: list = None) -> list:
     except Exception:
         pass
 
-    # 5. Fallback: n-gram phrase searches when < 8 results
+    # Fallback: n-gram phrase searches when < 8 results
     if len(results) < 8:
         words = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
         tried: list = []
@@ -230,14 +215,7 @@ def merged_search(query: str, _debug: list = None) -> list:
     return results
 
 
-# ── Claude ranking ───────────────────────────────────────────────────────────
-
 def _pre_sort(sets: list, query: str) -> list:
-    """
-    Pre-sort the result pool before showing to Claude.
-    Primary key: number of query words found in the set name (higher = better).
-    Secondary key: year (newer = better).
-    """
     qwords = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
     def sort_key(s):
         name = s['name'].lower()
@@ -297,8 +275,6 @@ def rank_with_claude(query: str, sets: list) -> list:
         return pre_sorted[:8]
 
 
-# ── Format ───────────────────────────────────────────────────────────────────
-
 def format_set(s: dict) -> dict:
     return {
         'set_num':     s['set_num'],
@@ -308,8 +284,6 @@ def format_set(s: dict) -> dict:
         'set_img_url': s.get('set_img_url'),
     }
 
-
-# ── HTTP handler ─────────────────────────────────────────────────────────────
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -324,7 +298,6 @@ class handler(BaseHTTPRequestHandler):
 
         _debug_log: list = [] if debug else None
         sets = merged_search(query, _debug_log)
-        # Filter out books, stickers, backpacks (0 or near-0 parts)
         sets = [s for s in sets if s.get('num_parts', 0) >= 10]
         ranked = rank_with_claude(query, sets)
 
