@@ -70,7 +70,8 @@ def find_theme_and_keywords(query: str, _log: list = None):
     """
     Theme detection: searches unigrams AND bigrams against Rebrickable themes.
     Picks the theme whose name covers the MOST query words.
-    "Speed Champions" (score=2) beats "Speed" (score=1) for "speed champions ferrari".
+    Only uses a theme if ALL meaningful words in the theme name appear in the query
+    (prevents "speed" matching "Speed Slammers" for query "speed champions ferrari").
     Returns (theme_id, remaining_keywords) or (None, cleaned_query).
     """
     words = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
@@ -111,13 +112,23 @@ def find_theme_and_keywords(query: str, _log: list = None):
             seen_ids.add(tid)
             unique.append((tid, twords))
 
-    # Pick theme with highest count of query words in its name
+    # Score = number of query words that appear in the theme name
     def score(c):
         return sum(1 for w in words if w in c[1])
 
-    best_id, best_words = max(unique, key=score)
-    if score((best_id, best_words)) == 0:
+    # Only accept themes where every MEANINGFUL word in the theme name
+    # also appears in the query.  This prevents "speed" -> "Speed Slammers"
+    # (theme has "slammers" which is NOT in the query "speed champions ferrari").
+    query_word_set = set(words)
+    def all_meaningful_in_query(c):
+        meaningful = {w for w in c[1] if w not in STOP_WORDS and len(w) > 2}
+        return all(w in query_word_set for w in meaningful)
+
+    valid = [c for c in unique if score(c) > 0 and all_meaningful_in_query(c)]
+    if not valid:
         return None, ' '.join(words)
+
+    best_id, best_words = max(valid, key=score)
 
     remaining = [w for w in words if w not in best_words]
     return best_id, ' '.join(remaining).strip()
@@ -159,7 +170,7 @@ def merged_search(query: str, _debug: list = None) -> list:
     if results:
         return results
 
-    # 2. Theme detection (unigrams + bigrams, picks best-scoring theme)
+    # 2. Theme detection (unigrams + bigrams, picks best-scoring valid theme)
     theme_id, keywords = find_theme_and_keywords(query, _log=_debug)
     if _debug is not None:
         _debug.append(f'theme_id={theme_id}, keywords="{keywords}"')
@@ -196,13 +207,11 @@ def merged_search(query: str, _debug: list = None) -> list:
     except Exception:
         pass
 
-    # 5. Fallback: always run phrase searches when we have < 8 good results
-    #    (handles wrong/small theme match like "speed" → theme 17 instead of Speed Champions)
+    # 5. Fallback: n-gram phrase searches when < 8 results
     if len(results) < 8:
         words = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
         tried: list = []
 
-        # n-word phrases from longest to shortest (skip the full query — already tried above)
         for n in range(len(words) - 1, 0, -1):
             for i in range(len(words) - n + 1):
                 phrase = ' '.join(words[i:i + n])
@@ -210,7 +219,6 @@ def merged_search(query: str, _debug: list = None) -> list:
                     tried.append(phrase)
                     add(search_sets(None, phrase, 15), f'phrase_{phrase}')
 
-        # Individual words (longer ones first) as last resort
         for word in sorted(words, key=len, reverse=True):
             if len(word) > 4 and word not in tried:
                 tried.append(word)
@@ -229,7 +237,6 @@ def _pre_sort(sets: list, query: str) -> list:
     Pre-sort the result pool before showing to Claude.
     Primary key: number of query words found in the set name (higher = better).
     Secondary key: year (newer = better).
-    This ensures Ferrari sets appear before Slammer Stunt Bikes for "speed champions ferrari".
     """
     qwords = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
     def sort_key(s):
@@ -243,7 +250,6 @@ def rank_with_claude(query: str, sets: list) -> list:
     if not ANTHROPIC_KEY or not sets:
         return _pre_sort(sets, query)[:8]
 
-    # Pre-sort so Claude sees the most-relevant sets first (within its 25-set window)
     pre_sorted = _pre_sort(sets, query)
 
     set_lines = '\n'.join(
