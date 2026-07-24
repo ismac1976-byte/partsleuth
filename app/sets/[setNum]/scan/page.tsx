@@ -132,9 +132,9 @@ export default function ScanPage() {
   return (
     <div className="space-y-4">
       {/* Header */}
-      <div className="flex items-center gap-3">
-        <Link href={`/sets/${setNum}`} className="text-sm text-gray-400">← Back</Link>
-        <h1 className="text-xl font-bold text-brand-900">Scan Bricks</h1>
+      <div className="flex items-center gap-3 pt-1">
+        <Link href={`/sets/${setNum}`} className="btn-ghost text-sm -ml-2">← Back</Link>
+        <h1 className="text-2xl font-black text-brand-900">Scan Bricks</h1>
       </div>
 
       {/* Hidden camera input */}
@@ -150,11 +150,11 @@ export default function ScanPage() {
       {/* ── IDLE ── */}
       {scanState === 'idle' && (
         <div className="space-y-4">
-          <div className="card text-center py-14 space-y-5">
+          <div className="card text-center py-12 space-y-5">
             <p className="text-7xl">📷</p>
             <div>
-              <p className="font-semibold text-gray-700 text-lg">Spread bricks on a plain surface</p>
-              <p className="text-sm text-gray-400 mt-1">White cloth or light table works best</p>
+              <p className="font-black text-brand-900 text-xl">Spread bricks on a plain surface</p>
+              <p className="text-sm text-brand-900/50 mt-1">White cloth or a light table works best</p>
             </div>
             <button
               onClick={() => fileRef.current?.click()}
@@ -162,17 +162,17 @@ export default function ScanPage() {
             >
               Take Photo
             </button>
-            <p className="text-xs text-gray-300">
-              Or choose an existing photo from your camera roll
+            <p className="text-xs text-brand-900/30">
+              Or choose from your camera roll
             </p>
           </div>
 
           {checklist.length === 0 && (
-            <div className="card bg-amber-50 border-amber-200 text-center py-4">
-              <p className="text-sm text-amber-700">
-                ⚠️ No parts list loaded.{' '}
-                <Link href={`/sets/${setNum}`} className="underline">Go back</Link>
-                {' '}and tap "Load Parts" first.
+            <div className="card border-lego-yellow bg-lego-cream text-center py-4">
+              <p className="text-sm font-semibold text-brand-900/70">
+                ⚠️ Parts list not loaded yet.{' '}
+                <Link href={`/sets/${setNum}`} className="text-brand-500 font-bold">Go back</Link>
+                {' '}and tap "Load Parts List" first.
               </p>
             </div>
           )}
@@ -202,12 +202,12 @@ export default function ScanPage() {
 
       {/* ── ERROR ── */}
       {scanState === 'error' && (
-        <div className="card text-center py-10 space-y-4">
-          <p className="text-4xl">❌</p>
-          <p className="font-semibold text-red-600">{errorMsg}</p>
+        <div className="card text-center py-12 space-y-4">
+          <p className="text-5xl">❌</p>
+          <p className="font-bold text-brand-500">{errorMsg}</p>
           <div className="flex gap-3 justify-center">
-            <button onClick={reset} className="btn-primary px-6">Try Again</button>
-            <Link href={`/sets/${setNum}`} className="btn-secondary px-6">Back</Link>
+            <button onClick={reset} className="btn-primary px-8">Try Again</button>
+            <Link href={`/sets/${setNum}`} className="btn-secondary px-8">Back</Link>
           </div>
         </div>
       )}
@@ -226,24 +226,25 @@ export default function ScanPage() {
 
           {/* Stats row */}
           <div className="grid grid-cols-3 gap-3">
-            <StatCard count={result.summary.needed}     label="Needed"      color="text-green-500" />
-            <StatCard count={result.summary.haveEnough} label="Have enough"  color="text-yellow-500" />
-            <StatCard count={result.summary.notInSet}   label="Not in set"  color="text-gray-400" />
+            <StatCard count={result.summary.needed}     label="Found"        color="text-status-needed" />
+            <StatCard count={result.summary.haveEnough} label="Have enough"   color="text-status-haveEnough" />
+            <StatCard count={result.summary.notInSet}   label="Not in set"   color="text-brand-900/30" />
           </div>
 
           {/* Legend */}
-          <div className="card py-3 flex flex-wrap gap-3 justify-center text-xs text-gray-500">
-            <LegendDot color="bg-green-500"  label="Needed — counts up towards your total" />
-            <LegendDot color="bg-yellow-400" label="Have enough already" />
-            <LegendDot color="bg-gray-300"   label="Not in this set" />
+          <div className="card py-3 flex flex-wrap gap-3 justify-center text-xs text-brand-900/50">
+            <LegendDot color="bg-status-needed"     label="Found — counted towards your total" />
+            <LegendDot color="bg-status-haveEnough" label="Already have enough" />
+            <LegendDot color="bg-gray-200"           label="Not in this set" />
           </div>
 
           {/* Actions */}
           <div className="flex gap-3">
-            <button onClick={reset} className="btn-secondary flex-1 text-base py-3">
-              📷  Scan Another
+            <button onClick={reset} className="btn-secondary flex-1 text-base py-3.5">
+              📷 Scan Another
             </button>
-            <Link href={`/sets/${setNum}/missing`} className="btn-primary flex-1 text-center text-base py-3">
+            <Link href={`/sets/${setNum}/missing`}
+                  className="btn-primary flex-1 text-center text-base py-3.5">
               View Missing
             </Link>
           </div>

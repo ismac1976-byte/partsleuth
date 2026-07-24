@@ -52,41 +52,49 @@ export default function MissingPage() {
   }
 
   if (loading) {
-    return <div className="text-center py-20 text-gray-400">Loading…</div>
+    return (
+      <div className="space-y-4 pt-2">
+        <div className="card h-24 animate-pulse bg-gray-50" />
+        <div className="space-y-2">
+          {[1,2,3,4].map(i => <div key={i} className="card h-16 animate-pulse bg-gray-50" />)}
+        </div>
+      </div>
+    )
   }
 
   return (
     <div className="space-y-5">
       {/* Header */}
-      <div className="flex items-center gap-3">
-        <Link href={`/sets/${setNum}`} className="text-sm text-gray-400">← Back</Link>
-        <h1 className="text-xl font-bold text-brand-900">Missing Parts</h1>
+      <div className="flex items-center gap-3 pt-1">
+        <Link href={`/sets/${setNum}`} className="btn-ghost text-sm -ml-2">← Back</Link>
+        <h1 className="text-2xl font-black text-brand-900">Missing Parts</h1>
       </div>
 
-      {/* Progress summary */}
-      <div className="card space-y-2">
+      {/* Progress summary card */}
+      <div className="card space-y-3">
         <div className="flex items-center justify-between">
           <div>
-            <p className="font-semibold">{foundCount} of {nonSpares.length} part types found</p>
-            <p className="text-sm text-gray-400">{missing.length} type{missing.length !== 1 ? 's' : ''} still missing</p>
+            <p className="font-bold text-brand-900">{foundCount} of {nonSpares.length} types found</p>
+            <p className="text-sm text-brand-900/40">
+              {missing.length === 0 ? 'All done!' : `${missing.length} type${missing.length !== 1 ? 's' : ''} still missing`}
+            </p>
           </div>
-          <p className="text-4xl font-bold text-brand-500">{pct}%</p>
+          <p className="text-4xl font-black text-brand-500">{pct}%</p>
         </div>
-        <div className="h-2.5 bg-gray-100 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-status-needed rounded-full transition-all duration-700"
-            style={{ width: `${pct}%` }}
-          />
+        <div className="progress-track">
+          <div className="progress-fill" style={{ width: `${pct}%` }} />
         </div>
       </div>
 
       {/* All complete */}
       {missing.length === 0 && (
-        <div className="card text-center py-14 space-y-3">
+        <div className="card text-center py-14 space-y-4">
           <p className="text-6xl">🎉</p>
-          <p className="text-2xl font-bold">Set Complete!</p>
-          <p className="text-sm text-gray-400">Every part is accounted for</p>
-          <Link href={`/sets/${setNum}`} className="btn-primary inline-block px-8 mt-2">
+          <div>
+            <p className="text-2xl font-black text-brand-900">Set Complete!</p>
+            <p className="text-sm text-brand-900/50 mt-1">Every part is accounted for</p>
+          </div>
+          <Link href={`/sets/${setNum}`} className="btn-primary inline-block px-10 mt-2">
             Done
           </Link>
         </div>
@@ -96,16 +104,16 @@ export default function MissingPage() {
       {missing.length > 0 && (
         <>
           <div className="flex items-center justify-between gap-3">
-            {/* Sort tabs */}
-            <div className="flex gap-1 bg-gray-100 rounded-xl p-1">
+            {/* Sort pills */}
+            <div className="flex gap-1 bg-white rounded-2xl p-1 border border-gray-100 shadow-sm">
               {(['quantity', 'name', 'color'] as SortMode[]).map(s => (
                 <button
                   key={s}
                   onClick={() => setSort(s)}
-                  className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors capitalize
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all capitalize
                     ${sort === s
-                      ? 'bg-white text-brand-900 shadow-sm'
-                      : 'text-gray-400 hover:text-gray-600'
+                      ? 'bg-brand-500 text-white shadow-sm'
+                      : 'text-brand-900/40 hover:text-brand-900/70'
                     }`}
                 >
                   {s}
@@ -113,12 +121,13 @@ export default function MissingPage() {
               ))}
             </div>
 
-            <Link href={`/sets/${setNum}/scan`} className="btn-primary text-sm px-4 py-2">
+            <Link href={`/sets/${setNum}/scan`}
+                  className="btn-primary text-sm px-4 py-2.5 flex items-center gap-1.5">
               📷 Scan
             </Link>
           </div>
 
-          <p className="text-xs text-gray-400">
+          <p className="text-xs text-brand-900/40 text-center">
             Tap a row to mark it as found manually
           </p>
 
@@ -132,49 +141,44 @@ export default function MissingPage() {
                   onClick={() => markFound(line)}
                   disabled={ticking === line.lineId}
                   className="card w-full text-left flex items-center gap-3 py-3
-                             active:scale-[0.99] transition-all
-                             hover:border-brand-300 hover:shadow-sm
-                             disabled:opacity-50"
+                             active:scale-[0.98] transition-all
+                             hover:shadow-card-hover disabled:opacity-50"
                 >
                   {/* Part image */}
                   <div className="w-12 h-12 flex-shrink-0 rounded-lg bg-gray-50
-                                  flex items-center justify-center overflow-hidden">
-                    {line.partImgUrl ? (
-                      <img src={line.partImgUrl} alt={line.partNum}
-                           className="w-full h-full object-contain" />
-                    ) : (
-                      <span className="text-xs text-gray-400 text-center px-1 leading-tight">
-                        {line.partNum}
-                      </span>
-                    )}
+                                  flex items-center justify-center overflow-hidden border border-gray-100">
+                    {line.partImgUrl
+                      ? <img src={line.partImgUrl} alt={line.partNum}
+                             className="w-full h-full object-contain" />
+                      : <span className="text-[10px] text-brand-900/30 text-center px-1 leading-tight">
+                          {line.partNum}
+                        </span>
+                    }
                   </div>
 
                   {/* Part info */}
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium leading-tight truncate">
+                    <p className="text-sm font-semibold leading-tight truncate">
                       {line.partName || line.partNum}
                     </p>
                     <div className="flex items-center gap-1.5 mt-0.5">
                       {line.colorRgb && (
-                        <span
-                          className="w-3 h-3 rounded-sm border border-gray-200 flex-shrink-0"
-                          style={{ backgroundColor: `#${line.colorRgb}` }}
-                        />
+                        <span className="w-3 h-3 rounded-sm border border-gray-200 flex-shrink-0"
+                              style={{ backgroundColor: `#${line.colorRgb}` }} />
                       )}
-                      <span className="text-xs text-gray-400 truncate">{line.colorName}</span>
+                      <span className="text-xs text-brand-900/40 truncate">{line.colorName}</span>
                     </div>
                   </div>
 
                   {/* Count */}
-                  <div className="text-right flex-shrink-0">
+                  <div className="text-right flex-shrink-0 min-w-[3rem]">
                     {ticking === line.lineId ? (
-                      <span className="text-xs text-gray-400">Saving…</span>
+                      <span className="inline-block w-4 h-4 border-2 border-brand-500
+                                       border-t-transparent rounded-full animate-spin" />
                     ) : (
                       <>
-                        <p className="text-sm font-bold text-red-500">
-                          need {still}
-                        </p>
-                        <p className="text-xs text-gray-400">
+                        <p className="text-sm font-black text-brand-500">×{still}</p>
+                        <p className="text-[10px] text-brand-900/30">
                           {line.quantityFound}/{line.quantityNeeded}
                         </p>
                       </>

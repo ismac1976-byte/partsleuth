@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import httpx
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -7,23 +8,46 @@ from urllib.parse import urlparse, parse_qs
 REBRICKABLE_KEY = os.environ.get('REBRICKABLE_API_KEY', '')
 ANTHROPIC_KEY   = os.environ.get('ANTHROPIC_API_KEY', '')
 
-# Words to ignore when splitting a query into candidate theme words
-STOP_WORDS = {'lego', 'the', 'a', 'an', 'of', 'for', 'in', 'and', 'or', 'set', 'sets', 'my'}
+# Words to ignore when searching for theme names
+STOP_WORDS = {'lego', 'the', 'a', 'an', 'of', 'for', 'in', 'and', 'or',
+               'set', 'sets', 'my', 'i', 'is', 'are'}
 
 
 def _rb_headers() -> dict:
     return {'Authorization': f'key {REBRICKABLE_KEY}'}
 
 
+# ── Direct set-number lookup ─────────────────────────────────────────────────
+
+def direct_set_lookup(query: str) -> list:
+    """If query is a bare set number (e.g. "75969" or "75969-1"), fetch it directly."""
+    m = re.match(r'^(\d{4,6})[-\s]?(\d?)$', query.strip())
+    if not m:
+        return []
+    set_num = m.group(1) + '-' + (m.group(2) or '1')
+    try:
+        resp = httpx.get(
+            f'https://rebrickable.com/api/v3/lego/sets/{set_num}/',
+            headers=_rb_headers(),
+            timeout=8,
+        )
+        if resp.status_code == 200:
+            return [resp.json()]
+    except Exception:
+        pass
+    return []
+
+
+# ── Theme detection (word-by-word) ───────────────────────────────────────────
+
 def find_theme_and_keywords(query: str) -> tuple:
     """
-    Split the query word-by-word, searching Rebrickable themes for each
-    significant word until we find a matching theme.
+    Check each non-stop word against the Rebrickable themes endpoint.
+    Returns (theme_id, remaining_keywords) or (None, cleaned_query).
 
-    Returns (theme_id_or_None, keyword_string).
-
-    Example: "lego friends cafe" → (494, "cafe")
-             "hogwarts castle"   → (None, "hogwarts castle")
+    Example: "lego friends cafe"  → theme_id=246, keywords="cafe"
+             "city fire station"  → theme_id=52,  keywords="fire station"
+             "hogwarts castle"    → None,          keywords="hogwarts castle"
     """
     words = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
 
@@ -32,31 +56,28 @@ def find_theme_and_keywords(query: str) -> tuple:
             resp = httpx.get(
                 'https://rebrickable.com/api/v3/lego/themes/',
                 headers=_rb_headers(),
-                params={'search': word, 'page_size': 5},
+                params={'search': word, 'page_size': 10},
                 timeout=6,
             )
             themes = resp.json().get('results', [])
-            # Only accept if the word genuinely appears in the theme name
             for theme in themes:
                 if word in theme['name'].lower():
-                    # Keywords = everything except the matched word (and "lego")
-                    keywords = ' '.join(
-                        w for w in words if w != word
-                    ).strip()
-                    return theme['id'], keywords or query
+                    remaining = [w for w in words if w != word]
+                    return theme['id'], ' '.join(remaining).strip()
         except Exception:
             pass
 
-    return None, query
+    return None, ' '.join(words)
 
 
-def search_sets(theme_id, keywords: str, page_size: int = 20) -> list:
-    """Search Rebrickable sets, optionally scoped to a theme."""
-    params = {'page_size': page_size, 'ordering': '-year'}
-    if keywords:
-        params['search'] = keywords
+# ── Rebrickable set search ───────────────────────────────────────────────────
+
+def search_sets(theme_id=None, keywords='', page_size=20) -> list:
+    params: dict = {'page_size': page_size, 'ordering': '-year'}
     if theme_id:
         params['theme_id'] = theme_id
+    if keywords:
+        params['search'] = keywords
     try:
         resp = httpx.get(
             'https://rebrickable.com/api/v3/lego/sets/',
@@ -69,14 +90,10 @@ def search_sets(theme_id, keywords: str, page_size: int = 20) -> list:
         return []
 
 
+# ── Merged search ────────────────────────────────────────────────────────────
+
 def merged_search(query: str) -> list:
-    """
-    1. Detect a Lego theme in the query (word-by-word).
-    2. If found: search WITHIN that theme using the remaining keywords.
-       This ensures "lego friends cafe" hits Friends sets, not Speed Champions.
-    3. Always fall back to a broad text search too, so non-theme queries still work.
-    """
-    seen: set = set()
+    seen: set  = set()
     results: list = []
 
     def add(sets: list):
@@ -85,37 +102,45 @@ def merged_search(query: str) -> list:
                 results.append(s)
                 seen.add(s['set_num'])
 
+    # 1. Direct set-number lookup (fastest, most precise)
+    add(direct_set_lookup(query))
+    if results:
+        return results
+
+    # 2. Word-by-word theme detection
     theme_id, keywords = find_theme_and_keywords(query)
 
     if theme_id:
-        # Targeted: within-theme keyword search  (e.g. Friends + "cafe")
-        add(search_sets(theme_id, keywords))
-        # Broader: recent sets from that theme (catches any that don't match text)
-        add(search_sets(theme_id, ''))
+        # Targeted: within-theme keyword search
+        if keywords:
+            add(search_sets(theme_id, keywords, page_size=20))
+        # Broader: most recent sets in that theme
+        add(search_sets(theme_id, '', page_size=20))
+        # Fallback: plain text search in case theme search missed relevant sets
+        if len(results) < 6:
+            add(search_sets(None, query, page_size=10))
     else:
-        # No theme detected — plain text search
-        add(search_sets(None, query))
-
-    # Safety net: if still thin, add a plain text search on the keywords
-    if len(results) < 6:
-        add(search_sets(None, keywords if theme_id else query))
+        # No theme matched — plain text search
+        add(search_sets(None, query, page_size=20))
 
     return results
 
 
+# ── Claude ranking ───────────────────────────────────────────────────────────
+
 def rank_with_claude(query: str, sets: list) -> list:
-    """Ask Claude Haiku to pick and order the 6 most relevant results."""
+    """Use Claude Haiku to reorder results by relevance to the user's query."""
     if not ANTHROPIC_KEY or not sets:
-        return sets[:6]
+        return sets[:8]
 
     set_lines = '\n'.join(
         f"{s['set_num']}: {s['name']} ({s['year']}, {s['num_parts']} pieces)"
-        for s in sets
+        for s in sets[:20]
     )
     prompt = (
         f'A LEGO fan is searching for: "{query}"\n\n'
         f'Rebrickable results:\n{set_lines}\n\n'
-        'Return ONLY a JSON array of the 6 most relevant set numbers in order, '
+        'Return ONLY a JSON array of the 8 most relevant set numbers in order, '
         'e.g. ["75969-1","71043-1"]. No explanation, no markdown.'
     )
 
@@ -129,22 +154,26 @@ def rank_with_claude(query: str, sets: list) -> list:
             },
             json={
                 'model': 'claude-haiku-4-5-20251001',
-                'max_tokens': 200,
+                'max_tokens': 300,
                 'messages': [{'role': 'user', 'content': prompt}],
             },
             timeout=15,
         )
-        ranked_nums = json.loads(resp.json()['content'][0]['text'].strip())
+        text = resp.json()['content'][0]['text'].strip()
+        ranked_nums = json.loads(text)
         set_map = {s['set_num']: s for s in sets}
         ranked = [set_map[n] for n in ranked_nums if n in set_map]
-        seen_set = set(ranked_nums)
+        # Append any that Claude didn't mention
+        seen_ranked = {s['set_num'] for s in ranked}
         for s in sets:
-            if s['set_num'] not in seen_set:
+            if s['set_num'] not in seen_ranked:
                 ranked.append(s)
-        return ranked[:6]
+        return ranked[:8]
     except Exception:
-        return sets[:6]
+        return sets[:8]
 
+
+# ── Format ───────────────────────────────────────────────────────────────────
 
 def format_set(s: dict) -> dict:
     return {
@@ -155,6 +184,8 @@ def format_set(s: dict) -> dict:
         'set_img_url': s.get('set_img_url'),
     }
 
+
+# ── HTTP handler ─────────────────────────────────────────────────────────────
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -172,6 +203,7 @@ class handler(BaseHTTPRequestHandler):
         self._json(200, {
             'results':       [format_set(s) for s in ranked],
             'claude_ranked': bool(ANTHROPIC_KEY),
+            'total_found':   len(sets),
         })
 
     def _json(self, status: int, data: dict):

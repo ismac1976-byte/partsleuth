@@ -8,21 +8,57 @@
     overscroll-behavior: none;
   }
   body {
-    @apply bg-gray-50 text-gray-900 antialiased;
+    background-color: #F5F3EE;
+    @apply text-brand-900 antialiased;
   }
 }
 
 @layer components {
+  /* ── Buttons ─────────────────────────────── */
   .btn-primary {
-    @apply bg-brand-500 text-white font-semibold px-6 py-3 rounded-2xl
-           shadow-md active:scale-95 transition-transform
-           disabled:opacity-50 disabled:pointer-events-none;
+    @apply bg-brand-500 text-white font-bold px-6 py-3 rounded-2xl
+           shadow-md active:scale-95 transition-all
+           disabled:opacity-40 disabled:pointer-events-none;
   }
   .btn-secondary {
-    @apply bg-white text-brand-600 font-semibold px-6 py-3 rounded-2xl
-           border border-brand-500 shadow-sm active:scale-95 transition-transform;
+    @apply bg-white text-brand-500 font-bold px-6 py-3 rounded-2xl
+           border-2 border-brand-500 shadow-sm active:scale-95 transition-all;
   }
+  .btn-ghost {
+    @apply bg-transparent text-brand-900/60 font-semibold px-4 py-2 rounded-xl
+           active:bg-black/5 transition-all;
+  }
+
+  /* ── Cards ───────────────────────────────── */
   .card {
-    @apply bg-white rounded-2xl shadow-sm border border-gray-100 p-4;
+    @apply bg-white rounded-2xl border border-gray-100 p-4;
+    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.06), 0 1px 2px -1px rgb(0 0 0 / 0.06);
+  }
+  .card-tap {
+    @apply bg-white rounded-2xl border border-gray-100 p-4
+           transition-all active:scale-[0.98] active:shadow-none;
+    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.06), 0 1px 2px -1px rgb(0 0 0 / 0.06);
+  }
+
+  /* ── Input ───────────────────────────────── */
+  .input-base {
+    @apply w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-base
+           text-brand-900 placeholder:text-gray-300
+           focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20
+           transition-all;
+  }
+
+  /* ── Section label ───────────────────────── */
+  .section-label {
+    @apply text-xs font-bold text-brand-900/40 uppercase tracking-widest;
+  }
+
+  /* ── Progress bar ────────────────────────── */
+  .progress-track {
+    @apply h-2.5 bg-gray-100 rounded-full overflow-hidden;
+  }
+  .progress-fill {
+    @apply h-full rounded-full transition-all duration-700;
+    background: linear-gradient(90deg, #22c55e, #16a34a);
   }
 }

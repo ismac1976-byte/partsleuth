@@ -19,45 +19,66 @@ export default function HomePage() {
     return unsub
   }, [])
 
+  const active   = sets.filter(s => s.status !== 'complete')
+  const complete = sets.filter(s => s.status === 'complete')
+
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-brand-900">Your Sets</h1>
-        <Link href="/sets/add" className="btn-primary text-sm py-2 px-4">
-          + Add Set
+
+      {/* Page header */}
+      <div className="flex items-center justify-between pt-1">
+        <div>
+          <h1 className="text-2xl font-black text-brand-900">Your Sets</h1>
+          {!loading && sets.length > 0 && (
+            <p className="text-sm text-brand-900/40 mt-0.5">
+              {sets.length} set{sets.length !== 1 ? 's' : ''} in collection
+            </p>
+          )}
+        </div>
+        <Link href="/sets/add"
+              className="btn-primary text-sm py-2.5 px-5 flex items-center gap-1.5">
+          <span className="text-base leading-none">+</span> Add Set
         </Link>
       </div>
 
+      {/* Loading shimmer */}
       {loading && (
-        <p className="text-gray-400 text-center py-12">Loading…</p>
+        <div className="space-y-3">
+          {[1,2,3].map(i => (
+            <div key={i} className="card h-24 animate-pulse bg-gray-50" />
+          ))}
+        </div>
       )}
 
+      {/* Empty state */}
       {!loading && sets.length === 0 && (
-        <div className="card text-center py-12 space-y-3">
-          <p className="text-4xl">🧱</p>
-          <p className="font-semibold text-gray-700">No sets yet</p>
-          <p className="text-sm text-gray-400">Add a set to get started</p>
-          <Link href="/sets/add" className="btn-primary inline-block mt-2">
-            Add your first set
+        <div className="card text-center py-16 space-y-4">
+          <p className="text-6xl">🧱</p>
+          <div>
+            <p className="text-xl font-black text-brand-900">No sets yet</p>
+            <p className="text-sm text-brand-900/50 mt-1">
+              Search for a LEGO set to get started
+            </p>
+          </div>
+          <Link href="/sets/add" className="btn-primary inline-flex items-center gap-2 mt-2 px-8">
+            Find your first set →
           </Link>
         </div>
       )}
 
-      <div className="space-y-3">
-        {sets.filter(s => s.status === 'active').map(set => (
-          <SetCard key={set.setNum} set={set} />
-        ))}
-      </div>
+      {/* Active sets */}
+      {active.length > 0 && (
+        <div className="space-y-3">
+          {active.map(set => <SetCard key={set.setNum} set={set} />)}
+        </div>
+      )}
 
-      {sets.some(s => s.status === 'complete') && (
-        <div>
-          <h2 className="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-2">
-            Complete
-          </h2>
-          <div className="space-y-3 opacity-60">
-            {sets.filter(s => s.status === 'complete').map(set => (
-              <SetCard key={set.setNum} set={set} />
-            ))}
+      {/* Completed sets */}
+      {complete.length > 0 && (
+        <div className="space-y-3">
+          <p className="section-label">Complete 🎉</p>
+          <div className="space-y-3 opacity-70">
+            {complete.map(set => <SetCard key={set.setNum} set={set} />)}
           </div>
         </div>
       )}
@@ -66,29 +87,40 @@ export default function HomePage() {
 }
 
 function SetCard({ set }: { set: PSSet }) {
-  // TODO: derive from checklist subscription in Session 3
-  const pct = 0
-
   return (
-    <Link href={`/sets/${set.setNum}`}>
-      <div className="card flex items-center gap-4 active:bg-gray-50">
-        {set.imageUrl && (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={set.imageUrl} alt={set.name}
-               className="w-16 h-16 object-contain rounded-xl bg-gray-50 flex-shrink-0" />
-        )}
+    <Link href={`/sets/${set.setNum}`} className="block">
+      <div className="card flex items-center gap-4 transition-all
+                      hover:shadow-card-hover active:scale-[0.98] active:shadow-none cursor-pointer">
+
+        {/* Set image */}
+        <div className="w-20 h-20 flex-shrink-0 rounded-xl bg-gray-50
+                        flex items-center justify-center overflow-hidden border border-gray-100">
+          {set.imageUrl
+            ? <img src={set.imageUrl} alt={set.name}
+                   className="w-full h-full object-contain" />
+            : <span className="text-3xl">🧱</span>
+          }
+        </div>
+
+        {/* Info */}
         <div className="flex-1 min-w-0">
-          <p className="font-semibold truncate">{set.name}</p>
-          <p className="text-xs text-gray-400">{set.setNum} · {set.year} · {set.totalParts} parts</p>
-          <div className="mt-2 h-1.5 bg-gray-100 rounded-full overflow-hidden">
-            <div className="h-full bg-status-needed rounded-full transition-all"
-                 style={{ width: `${pct}%` }} />
-          </div>
+          <p className="font-bold text-brand-900 leading-snug line-clamp-2">{set.name}</p>
+          <p className="text-xs text-brand-900/40 mt-0.5 font-medium">
+            {set.setNum} · {set.year} · {set.totalParts.toLocaleString()} pieces
+          </p>
+          {/* Status badge */}
+          <span className={`inline-block mt-1.5 text-[10px] font-bold uppercase tracking-wide
+                            px-2 py-0.5 rounded-full
+            ${set.status === 'complete'
+              ? 'bg-green-100 text-green-700'
+              : 'bg-lego-cream text-brand-900/50 border border-gray-200'
+            }`}>
+            {set.status === 'complete' ? '✓ Complete' : 'In progress'}
+          </span>
         </div>
-        <div className="text-right flex-shrink-0">
-          <p className="text-lg font-bold text-brand-500">{pct}%</p>
-          <p className="text-xs text-gray-400">found</p>
-        </div>
+
+        {/* Arrow */}
+        <span className="text-brand-900/20 text-xl flex-shrink-0">›</span>
       </div>
     </Link>
   )
