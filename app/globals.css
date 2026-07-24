@@ -4,53 +4,81 @@
 
 @layer base {
   html {
-    /* Prevent iOS bounce / overscroll on the scan screen */
     overscroll-behavior: none;
   }
   body {
     background-color: #F5F3EE;
-    @apply text-brand-900 antialiased;
+    color: #1A1A2E;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  a {
+    text-decoration: none;
+    color: inherit;
   }
 }
 
 @layer components {
   /* ── Buttons ─────────────────────────────── */
   .btn-primary {
-    @apply bg-brand-500 text-white font-bold px-6 py-3 rounded-2xl
-           shadow-md active:scale-95 transition-all
+    @apply inline-flex items-center justify-center
+           bg-brand-500 text-white font-bold px-6 py-3 rounded-2xl
+           shadow-md transition-all
            disabled:opacity-40 disabled:pointer-events-none;
   }
-  .btn-secondary {
-    @apply bg-white text-brand-500 font-bold px-6 py-3 rounded-2xl
-           border-2 border-brand-500 shadow-sm active:scale-95 transition-all;
+  .btn-primary:not(:disabled):active {
+    transform: scale(0.95);
   }
+
+  .btn-secondary {
+    @apply inline-flex items-center justify-center
+           bg-white text-brand-500 font-bold px-6 py-3 rounded-2xl
+           border-2 border-brand-500 shadow-sm transition-all;
+  }
+  .btn-secondary:active {
+    transform: scale(0.95);
+  }
+
   .btn-ghost {
-    @apply bg-transparent text-brand-900/60 font-semibold px-4 py-2 rounded-xl
-           active:bg-black/5 transition-all;
+    @apply inline-flex items-center justify-center
+           font-semibold px-4 py-2 rounded-xl transition-all;
+    background: transparent;
+    color: rgba(26, 26, 46, 0.55);
+    text-decoration: none;
   }
 
   /* ── Cards ───────────────────────────────── */
   .card {
     @apply bg-white rounded-2xl border border-gray-100 p-4;
-    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.06), 0 1px 2px -1px rgb(0 0 0 / 0.06);
+    box-shadow: 0 1px 3px 0 rgba(0,0,0,0.06), 0 1px 2px -1px rgba(0,0,0,0.06);
   }
   .card-tap {
-    @apply bg-white rounded-2xl border border-gray-100 p-4
-           transition-all active:scale-[0.98] active:shadow-none;
-    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.06), 0 1px 2px -1px rgb(0 0 0 / 0.06);
+    @apply bg-white rounded-2xl border border-gray-100 p-4 transition-all;
+    box-shadow: 0 1px 3px 0 rgba(0,0,0,0.06), 0 1px 2px -1px rgba(0,0,0,0.06);
+  }
+  .card-tap:active {
+    transform: scale(0.98);
+    box-shadow: none;
   }
 
-  /* ── Input ───────────────────────────────── */
+  /* ── Form input ──────────────────────────── */
   .input-base {
-    @apply w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-base
-           text-brand-900 placeholder:text-gray-300
-           focus:outline-none focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20
-           transition-all;
+    @apply w-full rounded-2xl border border-gray-200 bg-white px-4 py-3 text-base transition-all;
+    color: #1A1A2E;
+    outline: none;
+  }
+  .input-base::placeholder {
+    color: #D1D5DB;
+  }
+  .input-base:focus {
+    border-color: #E3000B;
+    box-shadow: 0 0 0 3px rgba(227, 0, 11, 0.12);
   }
 
   /* ── Section label ───────────────────────── */
   .section-label {
-    @apply text-xs font-bold text-brand-900/40 uppercase tracking-widest;
+    @apply text-xs font-bold uppercase tracking-widest;
+    color: rgba(26, 26, 46, 0.40);
   }
 
   /* ── Progress bar ────────────────────────── */
