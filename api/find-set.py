@@ -28,7 +28,7 @@ def direct_set_lookup(query: str) -> list:
         resp = httpx.get(
             f'https://rebrickable.com/api/v3/lego/sets/{set_num}/',
             headers=_rb_headers(),
-            timeout=8,
+            timeout=5,
         )
         if resp.status_code == 200:
             return [resp.json()]
@@ -58,7 +58,7 @@ def find_theme_and_keywords(query: str) -> tuple:
                 'https://rebrickable.com/api/v3/lego/themes/',
                 headers=_rb_headers(),
                 params={'search': word, 'page_size': 10},
-                timeout=6,
+                timeout=4,
             )
             themes = resp.json().get('results', [])
             for theme in themes:
@@ -86,7 +86,7 @@ def search_sets(theme_id=None, keywords='', page_size=20) -> list:
             'https://rebrickable.com/api/v3/lego/sets/',
             headers=_rb_headers(),
             params=params,
-            timeout=10,
+            timeout=7,
         )
         return resp.json().get('results', [])
     except Exception:
@@ -167,7 +167,7 @@ def rank_with_claude(query: str, sets: list) -> list:
                 'max_tokens': 300,
                 'messages': [{'role': 'user', 'content': prompt}],
             },
-            timeout=15,
+            timeout=10,
         )
         text = resp.json()['content'][0]['text'].strip()
         ranked_nums = json.loads(text)
