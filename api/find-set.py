@@ -172,8 +172,9 @@ def merged_search(query: str, _debug: list = None) -> list:
     except Exception:
         pass
 
-    # 5. Fallback: progressively shorter phrase searches, then single words
-    if not results:
+    # 5. Fallback: always run phrase searches when we have < 8 good results
+    #    (handles wrong/small theme match like "speed" → theme 17 instead of Speed Champions)
+    if len(results) < 8:
         words = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
         tried: list = []
 
