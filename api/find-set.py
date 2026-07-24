@@ -102,11 +102,14 @@ def find_theme_and_keywords(query: str):
 # ── Rebrickable set search ───────────────────────────────────────────────────
 
 def search_sets(theme_id=None, keywords='', page_size=20) -> list:
-    params: dict = {'page_size': page_size, 'ordering': '-year'}
+    params: dict = {'page_size': page_size}
     if theme_id:
         params['theme_id'] = theme_id
+        params['ordering'] = '-year'      # newest first for theme browsing
     if keywords:
         params['search'] = keywords
+        # When searching by keyword, don't force year ordering —
+        # Rebrickable's default relevance ranking is better
     try:
         data = _rb_get('sets/', params)
         return data.get('results', [])
@@ -177,7 +180,7 @@ def merged_search(query: str, _debug: list = None) -> list:
         words = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
         for word in words:
             if len(word) > 3:
-                add(search_sets(None, word, 10), f'word_{word}')
+                add(search_sets(None, word, 15), f'word_{word}')
         if _debug is not None:
             _debug.append(f'fallback_words: checked {[w for w in words if len(w) > 3]}')
 
