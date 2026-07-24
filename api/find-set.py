@@ -8,9 +8,8 @@ from urllib.parse import urlparse, parse_qs
 REBRICKABLE_KEY = os.environ.get('REBRICKABLE_API_KEY', '')
 ANTHROPIC_KEY   = os.environ.get('ANTHROPIC_API_KEY', '')
 
-# Words to ignore when searching for theme names
 STOP_WORDS = {'lego', 'the', 'a', 'an', 'of', 'for', 'in', 'and', 'or',
-               'set', 'sets', 'my', 'i', 'is', 'are'}
+               'set', 'sets', 'my', 'i', 'is', 'are', 'with', 'by'}
 
 
 def _rb_headers() -> dict:
@@ -20,7 +19,7 @@ def _rb_headers() -> dict:
 # ── Direct set-number lookup ─────────────────────────────────────────────────
 
 def direct_set_lookup(query: str) -> list:
-    """If query is a bare set number (e.g. "75969" or "75969-1"), fetch it directly."""
+    """If query is a bare set number (e.g. "75969" or "75969-1"), fetch directly."""
     m = re.match(r'^(\d{4,6})[-\s]?(\d?)$', query.strip())
     if not m:
         return []
@@ -38,16 +37,18 @@ def direct_set_lookup(query: str) -> list:
     return []
 
 
-# ── Theme detection (word-by-word) ───────────────────────────────────────────
+# ── Theme detection (word-by-word, removes all theme-name words) ─────────────
 
 def find_theme_and_keywords(query: str) -> tuple:
     """
-    Check each non-stop word against the Rebrickable themes endpoint.
-    Returns (theme_id, remaining_keywords) or (None, cleaned_query).
+    Word-by-word theme detection.
+    Crucially: removes ALL words in the matched theme name from the keyword list.
 
-    Example: "lego friends cafe"  → theme_id=246, keywords="cafe"
-             "city fire station"  → theme_id=52,  keywords="fire station"
-             "hogwarts castle"    → None,          keywords="hogwarts castle"
+    Examples:
+      "lego friends cafe"       → (friends_id, "cafe")
+      "star wars at-at"         → (star_wars_id, "at-at")   # removes both "star" AND "wars"
+      "harry potter diagon alley" → (hp_id, "diagon alley") # removes "harry" AND "potter"
+      "hogwarts castle"         → (None, "hogwarts castle") # no theme match → plain search
     """
     words = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
 
@@ -62,7 +63,9 @@ def find_theme_and_keywords(query: str) -> tuple:
             themes = resp.json().get('results', [])
             for theme in themes:
                 if word in theme['name'].lower():
-                    remaining = [w for w in words if w != word]
+                    # Remove ALL words that appear in the theme name, not just the matched word
+                    theme_words = set(theme['name'].lower().split())
+                    remaining = [w for w in words if w not in theme_words]
                     return theme['id'], ' '.join(remaining).strip()
         except Exception:
             pass
@@ -111,17 +114,23 @@ def merged_search(query: str) -> list:
     theme_id, keywords = find_theme_and_keywords(query)
 
     if theme_id:
-        # Targeted: within-theme keyword search
+        # a) Targeted: within-theme keyword search (catches "cafe" in Friends, etc.)
         if keywords:
             add(search_sets(theme_id, keywords, page_size=20))
-        # Broader: most recent sets in that theme
+        # b) Broader: recent sets in that theme (fills in when keyword is too specific)
         add(search_sets(theme_id, '', page_size=20))
-        # Fallback: plain text search in case theme search missed relevant sets
+        # c) Plain keyword search ignoring theme (catches older/retired sets)
+        if keywords and len(results) < 8:
+            add(search_sets(None, keywords, page_size=10))
+        # d) Full query text search as final fallback
         if len(results) < 6:
             add(search_sets(None, query, page_size=10))
     else:
-        # No theme matched — plain text search
+        # No theme matched — plain text search on full query
         add(search_sets(None, query, page_size=20))
+        # Also try without stop words in case multi-word search helps
+        if keywords and keywords != query and len(results) < 6:
+            add(search_sets(None, keywords, page_size=10))
 
     return results
 
@@ -135,13 +144,14 @@ def rank_with_claude(query: str, sets: list) -> list:
 
     set_lines = '\n'.join(
         f"{s['set_num']}: {s['name']} ({s['year']}, {s['num_parts']} pieces)"
-        for s in sets[:20]
+        for s in sets[:25]
     )
     prompt = (
         f'A LEGO fan is searching for: "{query}"\n\n'
-        f'Rebrickable results:\n{set_lines}\n\n'
-        'Return ONLY a JSON array of the 8 most relevant set numbers in order, '
-        'e.g. ["75969-1","71043-1"]. No explanation, no markdown.'
+        f'Rebrickable results (up to 25):\n{set_lines}\n\n'
+        'Return ONLY a JSON array of the 8 most relevant set numbers in order of relevance. '
+        'Prefer sets that directly match the search intent. '
+        'Example: ["75969-1","71043-1"]. No explanation, no markdown.'
     )
 
     try:
@@ -163,7 +173,6 @@ def rank_with_claude(query: str, sets: list) -> list:
         ranked_nums = json.loads(text)
         set_map = {s['set_num']: s for s in sets}
         ranked = [set_map[n] for n in ranked_nums if n in set_map]
-        # Append any that Claude didn't mention
         seen_ranked = {s['set_num'] for s in ranked}
         for s in sets:
             if s['set_num'] not in seen_ranked:
