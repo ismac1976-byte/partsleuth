@@ -62,8 +62,7 @@ def _lookup_all_themes(word: str) -> list:
 def find_theme_and_keywords(query: str, _log: list = None):
     """
     Theme detection with bigram search.
-    Only uses a theme if ALL meaningful words in the theme name appear in the query
-    (prevents "speed" matching "Speed Slammers" for "speed champions ferrari").
+    Only uses a theme if ALL meaningful words in the theme name appear in the query.
     """
     words = [w for w in query.lower().split() if w not in STOP_WORDS and len(w) > 2]
     if not words:
@@ -103,8 +102,6 @@ def find_theme_and_keywords(query: str, _log: list = None):
     def score(c):
         return sum(1 for w in words if w in c[1])
 
-    # Only accept themes where every meaningful word in the theme name
-    # also appears in the query. Prevents "speed" -> "Speed Slammers".
     query_word_set = set(words)
     def all_meaningful_in_query(c):
         meaningful = {w for w in c[1] if w not in STOP_WORDS and len(w) > 2}
@@ -161,10 +158,9 @@ def merged_search(query: str, _debug: list = None) -> list:
         search_tasks.append((theme_id, '', 20, 'broad_theme'))
     else:
         # No theme found: search each meaningful query word individually in parallel.
-        # Ensures brand/model words like "ferrari" are searched even when the
-        # full-text query returns only fuzzy unrelated matches.
+        # >= 4 chars catches short but important words like "cafe", "city", "fire".
         extra_words = [w for w in query.lower().split()
-                       if w not in STOP_WORDS and len(w) > 4]
+                       if w not in STOP_WORDS and len(w) >= 4]
         for word in extra_words:
             search_tasks.append((None, word, 10, f'word_{word}'))
     # Always text-search the full query
@@ -205,7 +201,7 @@ def merged_search(query: str, _debug: list = None) -> list:
                     add(search_sets(None, phrase, 15), f'phrase_{phrase}')
 
         for word in sorted(words, key=len, reverse=True):
-            if len(word) > 4 and word not in tried:
+            if len(word) >= 4 and word not in tried:
                 tried.append(word)
                 add(search_sets(None, word, 10), f'word_{word}')
 
