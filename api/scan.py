@@ -56,15 +56,35 @@ _PROMPT_FULL = (
 # When the client supplies the set's own parts catalog, identification becomes
 # multiple-choice against the real inventory — far more accurate than
 # open-vocabulary guessing, and part#/colour match the checklist exactly.
+def _group_catalog(catalog: list[str]) -> str:
+    """Group 'part | name | colour' lines under colour headers, so the
+    colour-shortlist step in the procedure becomes mechanical."""
+    groups: dict[str, list[str]] = {}
+    for line in catalog:
+        bits = [b.strip() for b in line.split('|')]
+        if len(bits) == 3:
+            groups.setdefault(bits[2], []).append(f'  {bits[0]} — {bits[1]}')
+        else:
+            groups.setdefault('Other', []).append(f'  {line}')
+    out = []
+    for colour in sorted(groups):
+        out.append(f'{colour}:')
+        out.extend(groups[colour])
+    return '\n'.join(out)
+
+
 def _prompt_crops(catalog: list[str] | None) -> str:
     if catalog:
-        cat = '\n'.join(catalog[:120])
+        cat = _group_catalog(catalog[:120])
         return (
             'LEGO expert. Each numbered image is a close-up of ONE LEGO piece '
-            'on white paper.\n'
-            'CANDIDATES — the parts expected in this set (part# | name | colour):\n'
+            'on a white background.\n'
+            'CANDIDATES — the complete inventory of this set, grouped by colour:\n'
             f'{cat}\n\n'
-            'This candidate list is the COMPLETE inventory of the set.\n'
+            'Colour tips: judge colour from the piece\'s LIT TOP surface, not '
+            'shadows. A piece that almost vanishes into the white background '
+            'is White. Medium Azure is bright sky-blue; Blue is strong primary '
+            'blue. Dark Bluish Gray is grey, not blue.\n'
             'For each image follow this procedure:\n'
             '1) Decide the colour you actually see.\n'
             '2) Shortlist ONLY the candidates in that colour.\n'
