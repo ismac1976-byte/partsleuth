@@ -423,6 +423,7 @@ function SingleScanner({ checklist, setNum }: { checklist: ChecklistLine[]; setN
   const [identifying, setIdentifying] = useState(false)
   const [shown, setShown]             = useState<SingleShown | null>(null)
   const [session, setSession]         = useState({ needed: 0, enough: 0, wrong: 0, other: 0 })
+  const forceScanRef = useRef<(() => void) | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -455,18 +456,20 @@ function SingleScanner({ checklist, setNum }: { checklist: ChecklistLine[]; setN
       return c
     }
 
-    async function tick() {
+    async function tick(force = false) {
       if (busyRef.current) return
       const crop = centerCrop()
       if (!crop) return
 
-      const sig    = frameSignature(crop)
-      const stable = signatureDiff(sig, prevSigRef.current) <= STABLE_DIFF
-      prevSigRef.current = sig
-      if (!stable) return
-      if (Date.now() < cooldownRef.current) return
-      if (foregroundFraction(crop) < MIN_FG) return
-      if (signatureDiff(sig, lastScanRef.current) <= NEW_SCENE_DIFF) return
+      const sig = frameSignature(crop)
+      if (!force) {
+        const stable = signatureDiff(sig, prevSigRef.current) <= STABLE_DIFF
+        prevSigRef.current = sig
+        if (!stable) return
+        if (Date.now() < cooldownRef.current) return
+        if (foregroundFraction(crop) < MIN_FG) return
+        if (signatureDiff(sig, lastScanRef.current) <= NEW_SCENE_DIFF) return
+      }
 
       busyRef.current = true
       setIdentifying(true)
@@ -515,9 +518,11 @@ function SingleScanner({ checklist, setNum }: { checklist: ChecklistLine[]; setN
       }
     }
 
+    forceScanRef.current = () => { tick(true) }
     start()
     return () => {
       cancelled = true
+      forceScanRef.current = null
       if (timer) clearInterval(timer)
       streamRef.current?.getTracks().forEach(t => t.stop())
     }
@@ -551,12 +556,17 @@ function SingleScanner({ checklist, setNum }: { checklist: ChecklistLine[]; setN
           </div>
         ) : (
           <>
-            {/* Reticle — mirrors the exact region that gets scanned */}
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className={`rounded-2xl border-4 border-dashed transition-colors
-                               ${identifying ? 'border-lego-yellow' : 'border-white/70'}`}
-                   style={{ width: '52%', aspectRatio: '1/1', maxHeight: '80%' }} />
-            </div>
+            {/* Reticle — mirrors the exact region that gets scanned.
+                Tap = scan right now (manual override of the motion gating). */}
+            <button
+              onClick={() => forceScanRef.current?.()}
+              aria-label="Scan now"
+              className="absolute inset-0 flex items-center justify-center"
+            >
+              <span className={`rounded-2xl border-4 border-dashed transition-colors block
+                                ${identifying ? 'border-lego-yellow' : 'border-white/70'}`}
+                    style={{ width: '52%', aspectRatio: '1/1', maxHeight: '80%' }} />
+            </button>
             <div className="absolute bottom-3 left-0 right-0 flex justify-center pointer-events-none">
               <span className="bg-black/60 text-white text-sm font-semibold px-4 py-1.5 rounded-full
                                flex items-center gap-2">
@@ -564,7 +574,7 @@ function SingleScanner({ checklist, setNum }: { checklist: ChecklistLine[]; setN
                   <span className="inline-block w-3.5 h-3.5 border-2 border-lego-yellow
                                    border-t-transparent rounded-full animate-spin" />
                 )}
-                {identifying ? 'Identifying…' : 'Hold one brick in the frame'}
+                {identifying ? 'Identifying…' : 'Hold one brick in the frame · tap to scan'}
               </span>
             </div>
           </>
