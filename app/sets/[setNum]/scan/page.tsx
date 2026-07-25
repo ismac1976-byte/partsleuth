@@ -149,7 +149,7 @@ export default function ScanPage() {
     await runScan(b64)
   }, [checklist, setNum, cameraReady])
 
-  // ── Photo file pick ──
+  // ── Photo file pick — auto-scans immediately after selection ──
 
   function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
@@ -157,11 +157,13 @@ export default function ScanPage() {
     const reader = new FileReader()
     reader.onload = ev => {
       const dataUrl = ev.target?.result as string
+      const b64 = dataUrl.split(',')[1]
       setPhotoPreview(dataUrl)
-      setPhotoB64(dataUrl.split(',')[1])
+      setPhotoB64(b64)
       setResult(null)
-      setScanState('idle')
       setErrorMsg('')
+      // Auto-scan straight away — no second button needed
+      runScan(b64)
     }
     reader.readAsDataURL(file)
   }
@@ -343,21 +345,38 @@ export default function ScanPage() {
           />
 
           {!photoPreview ? (
-            /* Photo picker card */
+            /* Photo picker — big obvious tap target */
             <button
               onClick={() => fileRef.current?.click()}
-              className="w-full rounded-2xl border-2 border-dashed border-brand-900/20
-                         bg-white flex flex-col items-center justify-center gap-3 py-16
-                         active:bg-brand-900/5 transition-colors"
+              className="w-full rounded-2xl bg-brand-900 text-white
+                         flex flex-col items-center justify-center gap-4 py-20
+                         active:scale-[0.98] transition-transform shadow-md"
             >
-              <span className="text-5xl">📷</span>
+              <span className="text-6xl">📷</span>
               <div className="text-center">
-                <p className="font-semibold text-brand-900">Take or upload a photo</p>
-                <p className="text-sm text-brand-900/50 mt-0.5">Spread bricks on a plain surface</p>
+                <p className="font-black text-xl">Take a Photo</p>
+                <p className="text-sm text-white/60 mt-1">Spread bricks on a plain surface, then tap</p>
               </div>
             </button>
+          ) : isProcessing ? (
+            /* Full-screen scanning state — unmissable */
+            <div className="rounded-2xl overflow-hidden bg-black relative" style={{ aspectRatio: '4/3' }}>
+              <img
+                src={photoPreview}
+                alt="Scanning…"
+                className="w-full h-full object-cover opacity-40"
+              />
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-5">
+                <div className="w-20 h-20 border-4 border-lego-yellow border-t-transparent
+                                rounded-full animate-spin" />
+                <div className="text-center">
+                  <p className="text-white font-black text-2xl">Identifying bricks…</p>
+                  <p className="text-white/60 text-base mt-1">This takes about 20 seconds</p>
+                </div>
+              </div>
+            </div>
           ) : (
-            /* Preview + scan */
+            /* Preview + result */
             <div className="space-y-3">
               <div className="relative rounded-2xl overflow-hidden bg-black"
                    style={{ aspectRatio: '4/3' }}>
@@ -368,36 +387,19 @@ export default function ScanPage() {
                   alt="Photo preview"
                   className="w-full h-full object-cover"
                 />
-                {isProcessing && (
-                  <div className="absolute inset-0 bg-black/50 flex flex-col items-center justify-center gap-3">
-                    <div className="w-14 h-14 border-4 border-white border-t-transparent
-                                    rounded-full animate-spin" />
-                    <p className="text-white font-semibold text-lg">Identifying bricks…</p>
-                    <p className="text-white/60 text-sm">Usually 15–20 seconds</p>
-                  </div>
-                )}
               </div>
-
               {scanState !== 'result' && (
                 <div className="flex gap-2">
-                  <button
-                    onClick={scanAgain}
-                    className="btn-ghost flex-1 py-3"
-                  >
+                  <button onClick={scanAgain} className="btn-ghost flex-1 py-3">
                     ← Retake
                   </button>
-                  <button
-                    onClick={handlePhotoScan}
-                    disabled={isProcessing}
-                    className="btn-primary flex-1 py-3 disabled:opacity-50"
-                  >
-                    {isProcessing ? 'Scanning…' : '🔍 Scan Photo'}
+                  <button onClick={handlePhotoScan} className="btn-primary flex-1 py-3">
+                    🔍 Scan Again
                   </button>
                 </div>
               )}
-
               {scanState === 'result' && (
-                <button onClick={scanAgain} className="btn-primary w-full py-3">
+                <button onClick={scanAgain} className="btn-primary w-full py-4 text-base">
                   📷 Scan Another Photo
                 </button>
               )}

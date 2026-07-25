@@ -183,26 +183,38 @@ export default function SetDetailPage() {
       {/* Actions */}
       {checklist.length > 0 ? (
         <div className="space-y-3">
-          <div className="grid grid-cols-2 gap-3">
-            <Link href={`/sets/${setNum}/scan?mode=camera`}
-                  className="btn-primary text-center text-base py-4 flex flex-col items-center gap-1">
-              <span className="text-2xl leading-none">📹</span>
-              <span className="text-sm font-bold">Live Camera</span>
-            </Link>
-            <Link href={`/sets/${setNum}/scan?mode=photo`}
-                  className="btn-primary text-center text-base py-4 flex flex-col items-center gap-1">
-              <span className="text-2xl leading-none">📷</span>
-              <span className="text-sm font-bold">Take Photo</span>
-            </Link>
-          </div>
-          <Link href={`/sets/${setNum}/missing`}
-                className="btn-secondary w-full text-center text-sm py-3 block">
-            📋 View Missing Parts
+          {/* Primary scan actions — large, clear rows */}
+          <Link href={`/sets/${setNum}/scan?mode=camera`}
+                className="flex items-center gap-4 w-full bg-brand-900 text-white
+                           rounded-2xl px-5 py-4 shadow-md active:scale-[0.98] transition-transform">
+            <span className="text-3xl flex-shrink-0">📹</span>
+            <div className="flex-1 text-left">
+              <p className="font-black text-base leading-tight">Live Camera</p>
+              <p className="text-sm text-white/60 mt-0.5">Hold bricks up one by one</p>
+            </div>
+            <span className="text-white/30 text-2xl">›</span>
           </Link>
-          <a href={instructionsUrl} target="_blank" rel="noopener noreferrer"
-             className="btn-secondary w-full text-center text-sm py-3 block">
-            📖 Building Instructions
-          </a>
+          <Link href={`/sets/${setNum}/scan?mode=photo`}
+                className="flex items-center gap-4 w-full bg-brand-900 text-white
+                           rounded-2xl px-5 py-4 shadow-md active:scale-[0.98] transition-transform">
+            <span className="text-3xl flex-shrink-0">📷</span>
+            <div className="flex-1 text-left">
+              <p className="font-black text-base leading-tight">Take Photo</p>
+              <p className="text-sm text-white/60 mt-0.5">Spread bricks out and photograph them</p>
+            </div>
+            <span className="text-white/30 text-2xl">›</span>
+          </Link>
+          {/* Secondary actions */}
+          <div className="flex gap-3 pt-1">
+            <Link href={`/sets/${setNum}/missing`}
+                  className="btn-secondary flex-1 text-center text-sm py-3">
+              📋 Missing
+            </Link>
+            <a href={instructionsUrl} target="_blank" rel="noopener noreferrer"
+               className="btn-secondary flex-1 text-center text-sm py-3">
+              📖 Instructions
+            </a>
+          </div>
         </div>
       ) : (
         <div className="space-y-3">
