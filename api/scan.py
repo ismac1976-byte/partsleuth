@@ -79,10 +79,13 @@ def _prompt_crops(catalog: list[str] | None) -> str:
             '{"pieces":[{"i":1,"p":"3005","c":"Dark Red","cf":"h"}]}'
         )
     return (
-        'LEGO expert. Each numbered image is a close-up of ONE LEGO piece on '
-        'white paper. Identify the piece in every image.\n'
+        'LEGO expert. Each numbered image is a close-up of ONE LEGO piece. '
+        'Identify the piece in every image.\n'
         'Each entry: {"i":<image number>,"p":"part#","c":"color","cf":"X"}\n'
         + _PART_VOCAB +
+        'HONESTY RULE: only give a part# you are CERTAIN of. If unsure of the '
+        'exact number, set "p":null but still give the colour and cf. A null '
+        'is far more useful than a plausible-looking wrong number.\n'
         'Include EVERY image number exactly once, in order.\n'
         'Return ONLY valid JSON:\n'
         '{"pieces":[{"i":1,"p":"3001","c":"Red","cf":"h"}]}'
