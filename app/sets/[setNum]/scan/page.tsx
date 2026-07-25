@@ -7,7 +7,7 @@ import { useParams } from 'next/navigation'
 import type { ChecklistLine, ScanResult, Detection, DetectionStatus } from '@/lib/types'
 import Link from 'next/link'
 
-type ScanState = 'idle' | 'processing' | 'result' | 'error'
+type ScanState = 'camera' | 'processing' | 'result' | 'error'
 
 // ── API format helpers ───────────────────────────────────────────────────────
 
@@ -43,60 +43,88 @@ function mapDetection(d: Record<string, any>): Detection {
 // ── Status config ────────────────────────────────────────────────────────────
 
 const STATUS_CONFIG: Record<DetectionStatus, {
-  dot: string; card: string; label: string; emoji: string
+  dot: string; card: string; label: string
 }> = {
-  needed:      { dot: 'bg-green-500',  card: 'border-green-200 bg-green-50',   label: 'Needed',       emoji: '🟢' },
-  have_enough: { dot: 'bg-yellow-400', card: 'border-yellow-200 bg-yellow-50', label: 'Have enough',  emoji: '🟡' },
-  wrong_color: { dot: 'bg-orange-400', card: 'border-orange-200 bg-orange-50', label: 'Wrong colour', emoji: '🟠' },
-  not_in_set:  { dot: 'bg-gray-300',   card: 'border-gray-200',                label: 'Not in set',   emoji: '⚫' },
-  unknown:     { dot: 'bg-red-500',    card: 'border-red-200 bg-red-50',       label: 'Unknown',      emoji: '🔴' },
+  needed:      { dot: 'bg-green-500',  card: 'border-green-200 bg-green-50',   label: 'Needed'       },
+  have_enough: { dot: 'bg-yellow-400', card: 'border-yellow-200 bg-yellow-50', label: 'Have enough'  },
+  wrong_color: { dot: 'bg-orange-400', card: 'border-orange-200 bg-orange-50', label: 'Wrong colour' },
+  not_in_set:  { dot: 'bg-gray-300',   card: 'border-gray-200',                label: 'Not in set'   },
+  unknown:     { dot: 'bg-red-500',    card: 'border-red-200 bg-red-50',       label: 'Unknown'      },
 }
 
 const CONFIDENCE_BADGE: Record<string, string> = {
-  high:   '',
-  medium: '~',
-  low:    '?',
-  none:   '??',
+  high: '', medium: '~', low: '?', none: '??',
 }
 
 // ── Main component ───────────────────────────────────────────────────────────
 
 export default function ScanPage() {
   const { setNum } = useParams<{ setNum: string }>()
-  const fileRef    = useRef<HTMLInputElement>(null)
-  const imgRef     = useRef<HTMLImageElement>(null)
+  const videoRef  = useRef<HTMLVideoElement>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const streamRef = useRef<MediaStream | null>(null)
 
   const [checklist,   setChecklist]   = useState<ChecklistLine[]>([])
-  const [scanState,   setScanState]   = useState<ScanState>('idle')
+  const [scanState,   setScanState]   = useState<ScanState>('camera')
   const [result,      setResult]      = useState<ScanResult | null>(null)
-  const [previewUrl,  setPreviewUrl]  = useState<string | null>(null)
   const [errorMsg,    setErrorMsg]    = useState('')
-  const [showOverlay, setShowOverlay] = useState(true)
+  const [cameraReady, setCameraReady] = useState(false)
+  const [cameraError, setCameraError] = useState('')
 
   // Live checklist subscription
   useEffect(() => {
-    return onSnapshot(collection(db, 'sets', setNum, 'checklist'), snap => {
+    return onSnapshot(collection(db, 'sets'l setNum, 'checklist'), snap => {
       setChecklist(snap.docs.map(d => d.data() as ChecklistLine))
     })
   }, [setNum])
 
-  // ── Scan handler ──
+  // Start camera on mount
+  useEffect(() => {
+    let cancelled = false
 
-  const handleFile = useCallback(async (file: File) => {
+    async function startCamera() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
+          audio: false,
+        })
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return }
+        streamRef.current = stream
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream
+          setCameraReady(true)
+        }
+      } catch {
+        if (!cancelled) setCameraError("Can't access camera — please allow camera permission and reload.")
+      }
+    }
+
+    startCamera()
+    return () => {
+      cancelled = true
+      streamRef.current?.getTracks().forEach(t => t.stop())
+    }
+  }, [])
+
+  // ── Capture + scan ──
+
+  function captureFrame(): string {
+    const v = videoRef.current!
+    const c = canvasRef.current!
+    c.width  = v.videoWidth
+    c.height = v.videoHeight
+    c.getContext('2d')!.drawImage(v, 0, 0)
+    return c.toDataURL('image/jpeg', 0.85).split(',')[1]
+  }
+
+  const handleScan = useCallback(async () => {
+    if (!cameraReady) return
     setScanState('processing')
     setResult(null)
     setErrorMsg('')
 
-    const url = URL.createObjectURL(file)
-    setPreviewUrl(url)
-
     try {
-      const b64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader()
-        reader.onload  = () => resolve((reader.result as string).split(',')[1])
-        reader.onerror = reject
-        reader.readAsDataURL(file)
-      })
+      const b64 = captureFrame()
 
       const resp = await fetch('/api/scan', {
         method:  'POST',
@@ -128,199 +156,161 @@ export default function ScanPage() {
 
       setResult(scanResult)
       setScanState('result')
-
-      // Persist found counts to Firestore
       await persistFinds(setNum, scanResult.detections)
 
     } catch (e: any) {
       setErrorMsg(e.message ?? 'Scan failed — please try again')
       setScanState('error')
     }
-  }, [checklist, setNum])
+  }, [checklist, setNum, cameraReady])
 
-  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (file) handleFile(file)
-    e.target.value = ''
-  }
-
-  const reset = () => {
-    setScanState('idle')
+  const scanAgain = () => {
+    setScanState('camera')
     setResult(null)
-    setPreviewUrl(prev => { if (prev) URL.revokeObjectURL(prev); return null })
+    setErrorMsg('')
   }
 
   // ── Render ──
 
   return (
     <div className="space-y-4">
+
       {/* Header */}
       <div className="flex items-center gap-3 pt-1">
         <Link href={`/sets/${setNum}`} className="btn-ghost text-sm -ml-2">← Back</Link>
         <h1 className="text-2xl font-black text-brand-900">Scan Bricks</h1>
       </div>
 
-      {/* Hidden camera input */}
-      <input
-        ref={fileRef}
-        type="file"
-        accept="image/*"
-        capture="environment"
-        className="hidden"
-        onChange={onFileChange}
-      />
+      {/* Hidden canvas for frame capture */}
+      <canvas ref={canvasRef} className="hidden" />
 
-      {/* ── IDLE ── */}
-      {scanState === 'idle' && (
-        <div className="space-y-4">
-          <div className="card text-center py-12 space-y-5">
-            <p className="text-7xl">📷</p>
-            <div>
-              <p className="font-black text-brand-900 text-xl">Spread bricks on a plain surface</p>
-              <p className="text-sm text-brand-900/50 mt-1">
-                White cloth or a light table works best.<br />
-                Aim to keep bricks separate so each can be identified.
-              </p>
-            </div>
-            <button
-              onClick={() => fileRef.current?.click()}
-              className="btn-primary px-10 py-4 text-lg"
-            >
-              Take Photo
-            </button>
-            <p className="text-xs text-brand-900/30">Or choose from your camera roll</p>
+      {/* ── Camera viewport ── */}
+      <div className="relative rounded-2xl overflow-hidden bg-black"
+           style={{ aspectRatio: '4/3' }}>
+
+        {/* Live video — always mounted so stream stays active */}
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
+          className={`w-full h-full object-cover transition-opacity duration-200
+                      ${scanState === 'result' ? 'opacity-0' : 'opacity-100'}`}
+        />
+
+        {/* Annotated result — overlays video after scan */}
+        {scanState === 'result' && result && (
+          <img
+            src={`data:image/jpeg;base64,${result.annotatedImageB64}`}
+            alt="Scan result"
+            className="absolute inset-0 w-full h-full object-cover"
+          />
+        )}
+
+        {/* Processing overlay */}
+        {scanState === 'processing' && (
+          <div className="absolute inset-0 bg-black/50 flex flex-col items-center justify-center gap-3">
+            <div className="w-14 h-14 border-4 border-white border-t-transparent
+                            rounded-full animate-spin" />
+            <p className="text-white font-semibold text-lg">Identifying bricks…</p>
+            <p className="text-white/60 text-sm">Claude is scanning every piece</p>
           </div>
+        )}
 
-          {/* Legend */}
-          <div className="card py-3">
-            <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-2 text-center">
-              What the colours mean
+        {/* Camera error */}
+        {cameraError && (
+          <div className="absolute inset-0 flex items-center justify-center bg-gray-900 p-6">
+            <div className="text-center space-y-3">
+              <p className="text-4xl">📷</p>
+              <p className="text-white text-sm font-medium">{cameraError}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Shutter button — camera / error state */}
+        {(scanState === 'camera' || scanState === 'error') && cameraReady && (
+          <button
+            onClick={handleScan}
+            aria-label="Scan"
+            className="absolute bottom-5 left-1/2 -translate-x-1/2
+                       active:scale-90 transition-transform"
+            style={{ width: 72, height: 72 }}
+          >
+            <span className="absolute inset-0 rounded-full border-4 border-white opacity-80" />
+            <span className="absolute inset-2 rounded-full bg-white" />
+          </button>
+        )}
+
+        {/* Scan again pill — result state */}
+        {scanState === 'result' && (
+          <button
+            onClick={scanAgain}
+            className="absolute bottom-4 left-1/2 -translate-x-1/2
+                       px-5 py-2.5 rounded-full bg-white/90 backdrop-blur-sm
+                       font-semibold text-brand-900 shadow-lg text-sm
+                       active:scale-95 transition-transform whitespace-nowrap"
+          >
+            📷 Scan Again
+          </button>
+        )}
+
+        {/* Checklist missing hint */}
+        {checklist.length === 0 && scanState === 'camera' && (
+          <div className="absolute top-3 left-3 right-3
+                          bg-lego-yellow/90 backdrop-blur-sm rounded-xl px-3 py-2">
+            <p className="text-xs font-semibold text-brand-900 text-center">
+              ⚠️ Load the parts list first —{' '}
+              <Link href={`/sets/${setNum}`} className="underline">go back</Link>
             </p>
-            <div className="flex flex-wrap gap-2 justify-center">
-              {(Object.entries(STATUS_CONFIG) as [DetectionStatus, typeof STATUS_CONFIG[DetectionStatus]][])
-                .map(([status, cfg]) => (
-                  <span key={status} className="flex items-center gap-1.5 text-xs text-brand-900/60">
-                    <span className={`w-3 h-3 rounded-sm ${cfg.dot} flex-shrink-0`} />
-                    {cfg.label}
-                  </span>
-                ))}
-            </div>
           </div>
+        )}
+      </div>
 
-          {checklist.length === 0 && (
-            <div className="card border-lego-yellow bg-lego-cream text-center py-4">
-              <p className="text-sm font-semibold text-brand-900/70">
-                ⚠️ Parts list not loaded yet.{' '}
-                <Link href={`/sets/${setNum}`} className="text-brand-500 font-bold">Go back</Link>
-                {' '}and tap "Load Parts List" first.
-              </p>
-            </div>
-          )}
+      {/* Error message */}
+      {scanState === 'error' && errorMsg && (
+        <div className="card border-red-200 bg-red-50 text-center py-4 space-y-2">
+          <p className="font-semibold text-red-700">{errorMsg}</p>
+          <button onClick={scanAgain} className="btn-primary px-8 text-sm">Try Again</button>
         </div>
       )}
 
-      {/* ── PROCESSING ── */}
-      {scanState === 'processing' && (
-        <div className="space-y-4">
-          {previewUrl && (
-            <div className="relative rounded-2xl overflow-hidden">
-              <img src={previewUrl} alt="Scanning…"
-                   className="w-full object-contain max-h-[60vh] bg-gray-50" />
-              <div className="absolute inset-0 flex flex-col items-center justify-center
-                              bg-black/50 gap-4">
-                <div className="w-12 h-12 border-4 border-white border-t-transparent
-                                rounded-full animate-spin" />
-                <div className="text-center px-4">
-                  <p className="text-white font-semibold text-lg">Identifying bricks…</p>
-                  <p className="text-white/60 text-sm mt-1">
-                    Claude is scanning every piece in the photo
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── ERROR ── */}
-      {scanState === 'error' && (
-        <div className="card text-center py-12 space-y-4">
-          <p className="text-5xl">❌</p>
-          <p className="font-bold text-brand-500">{errorMsg}</p>
-          <div className="flex gap-3 justify-center">
-            <button onClick={reset} className="btn-primary px-8">Try Again</button>
-            <Link href={`/sets/${setNum}`} className="btn-secondary px-8">Back</Link>
-          </div>
-        </div>
-      )}
-
-      {/* ── RESULT ── */}
+      {/* ── Result panel ── */}
       {scanState === 'result' && result && (
         <div className="space-y-4">
 
-          {/* Annotated image */}
-          <div className="rounded-2xl overflow-hidden bg-gray-50 relative">
-            <img
-              ref={imgRef}
-              src={`data:image/jpeg;base64,${result.annotatedImageB64}`}
-              alt="Scan result"
-              className="w-full object-contain"
-            />
-            {/* Toggle overlay button */}
-            <button
-              onClick={() => setShowOverlay(v => !v)}
-              className="absolute top-3 right-3 bg-black/60 text-white text-xs px-3 py-1.5
-                         rounded-full font-medium backdrop-blur-sm"
-            >
-              {showOverlay ? 'Hide labels' : 'Show labels'}
-            </button>
-          </div>
-
           {/* Summary stats */}
           <div className="grid grid-cols-5 gap-2">
-            <StatCard count={result.summary.needed}     label="Needed"       dotClass="bg-green-500"  />
-            <StatCard count={result.summary.haveEnough} label="Enough"       dotClass="bg-yellow-400" />
-            <StatCard count={result.summary.wrongColor} label="Wrong clr"    dotClass="bg-orange-400" />
-            <StatCard count={result.summary.notInSet}   label="Not in set"   dotClass="bg-gray-300"   />
-            <StatCard count={result.summary.unknown}    label="Unknown"      dotClass="bg-red-500"    />
+            <StatCard count={result.summary.needed}     label="Needed"     dotClass="bg-green-500"  />
+            <StatCard count={result.summary.haveEnough} label="Enough"     dotClass="bg-yellow-400" />
+            <StatCard count={result.summary.wrongColor} label="Wrong clr"  dotClass="bg-orange-400" />
+            <StatCard count={result.summary.notInSet}   label="Not in set" dotClass="bg-gray-300"   />
+            <StatCard count={result.summary.unknown}    label="Unknown"    dotClass="bg-red-500"    />
           </div>
 
-          {/* Unknown pieces callout */}
+          {/* Callouts */}
           {result.summary.unknown > 0 && (
             <div className="card border-red-200 bg-red-50 py-3 text-center">
               <p className="text-sm font-semibold text-red-700">
                 🔴 {result.summary.unknown} piece{result.summary.unknown !== 1 ? 's' : ''} couldn't be identified.
               </p>
-              <p className="text-xs text-red-500 mt-0.5">
-                Check the red boxes — try a clearer photo or better lighting.
-              </p>
+              <p className="text-xs text-red-500 mt-0.5">Try a clearer photo or better lighting.</p>
             </div>
           )}
-
-          {/* Wrong-colour callout */}
           {result.summary.wrongColor > 0 && (
             <div className="card border-orange-200 bg-orange-50 py-3 text-center">
               <p className="text-sm font-semibold text-orange-700">
                 🟠 {result.summary.wrongColor} piece{result.summary.wrongColor !== 1 ? 's' : ''} — right shape, wrong colour.
               </p>
-              <p className="text-xs text-orange-500 mt-0.5">
-                These exist in your set but in a different colour.
-              </p>
             </div>
           )}
 
-          {/* Actions */}
-          <div className="flex gap-3">
-            <button onClick={reset} className="btn-secondary flex-1 text-base py-3.5">
-              📷 Scan Another
-            </button>
-            <Link href={`/sets/${setNum}/missing`}
-                  className="btn-primary flex-1 text-center text-base py-3.5">
-              View Missing
-            </Link>
-          </div>
+          {/* View missing link */}
+          <Link href={`/sets/${setNum}/missing`}
+                className="btn-primary w-full text-center text-base py-3.5 block">
+            View Missing →
+          </Link>
 
-          {/* Detected parts list */}
+          {/* Detection list */}
           {result.detections.length > 0 && (
             <div>
               <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-2">
@@ -328,11 +318,10 @@ export default function ScanPage() {
               </h2>
               <div className="space-y-2">
                 {result.detections.map((d, i) => {
-                  const cfg = STATUS_CONFIG[d.status]
+                  const cfg   = STATUS_CONFIG[d.status]
                   const badge = CONFIDENCE_BADGE[d.confidence] ?? '??'
                   const displayName = d.name
                     || (d.status === 'unknown' ? 'Could not identify' : d.partNum || '—')
-
                   return (
                     <div key={i} className={`card flex items-center gap-3 py-2.5 ${cfg.card}`}>
                       <span className={`w-3 h-3 rounded-full flex-shrink-0 ${cfg.dot}`} />
@@ -362,16 +351,33 @@ export default function ScanPage() {
             </div>
           )}
 
-          {/* Empty state */}
           {result.detections.length === 0 && (
             <div className="card text-center py-8 space-y-2">
               <p className="text-3xl">🔍</p>
               <p className="font-semibold text-brand-900/70">No pieces detected</p>
               <p className="text-sm text-brand-900/40">
-                Try spreading bricks further apart on a plain, well-lit surface.
+                Spread bricks further apart on a plain, well-lit surface.
               </p>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Legend — idle state only */}
+      {scanState === 'camera' && (
+        <div className="card py-3">
+          <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-2 text-center">
+            What the colours mean
+          </p>
+          <div className="flex flex-wrap gap-2 justify-center">
+            {(Object.entries(STATUS_CONFIG) as [DetectionStatus, typeof STATUS_CONFIG[DetectionStatus]][])
+              .map(([status, cfg]) => (
+                <span key={status} className="flex items-center gap-1.5 text-xs text-brand-900/60">
+                  <span className={`w-3 h-3 rounded-sm ${cfg.dot} flex-shrink-0`} />
+                  {cfg.label}
+                </span>
+              ))}
+          </div>
         </div>
       )}
     </div>
@@ -397,7 +403,6 @@ function StatCard({
 // ── Firestore persistence ────────────────────────────────────────────────────
 
 async function persistFinds(setNum: string, detections: Detection[]) {
-  // Only persist 'needed' detections (those actively counted towards the total)
   const counts: Record<string, number> = {}
   for (const det of detections) {
     if (det.status === 'needed' && det.checklistMatches.length > 0) {
