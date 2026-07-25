@@ -49,13 +49,14 @@ export default function MissingPage() {
     }
   }
 
-  // Remove 1 from quantityFound (undo a mistaken tick)
+  // Remove 1 from quantityFound (undo a mistaken tick).
+  // Absolute clamped write — rapid taps can never go below zero.
   async function removeOne(line: ChecklistLine) {
     if (ticking || line.quantityFound <= 0) return
     setTicking(line.lineId)
     try {
       await updateDoc(doc(db, 'sets', setNum, 'checklist', line.lineId), {
-        quantityFound: increment(-1),
+        quantityFound: Math.max(0, line.quantityFound - 1),
       })
     } finally {
       setTicking(null)

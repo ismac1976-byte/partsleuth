@@ -41,13 +41,13 @@ export default function FoundPage() {
     } finally { setTicking(null) }
   }
 
-  // − = remove just one
+  // − = remove just one (absolute clamped write — can never go below zero)
   async function removeOne(line: ChecklistLine) {
     if (ticking || line.quantityFound <= 0) return
     setTicking(line.lineId)
     try {
       await updateDoc(doc(db, 'sets', setNum, 'checklist', line.lineId), {
-        quantityFound: increment(-1),
+        quantityFound: Math.max(0, line.quantityFound - 1),
       })
     } finally { setTicking(null) }
   }

@@ -116,7 +116,10 @@ export default function SetDetailPage() {
     if (ticking || line.quantityFound <= 0) return
     setTicking(line.lineId)
     try {
-      await updateDoc(doc(db, 'sets', setNum, 'checklist', line.lineId), { quantityFound: increment(-1) })
+      // Absolute clamped write (not increment): rapid taps can never push
+      // the count below zero or leave a stale remainder.
+      await updateDoc(doc(db, 'sets', setNum, 'checklist', line.lineId),
+        { quantityFound: Math.max(0, line.quantityFound - 1) })
     } finally { setTicking(null) }
   }
 
