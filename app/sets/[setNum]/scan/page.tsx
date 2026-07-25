@@ -1,4 +1,5 @@
 'use client'
+// build-fix
 
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { collection, onSnapshot, doc, updateDoc, increment } from 'firebase/firestore'
@@ -62,7 +63,7 @@ const CONFIDENCE_BADGE: Record<string, string> = {
 export default function ScanPage() {
   const { setNum } = useParams<{ setNum: string }>()
   const videoRef   = useRef<HTMLVIdeUlElement>(null)
-  const canvasRef  = useRef<HTMLCAÖGElement>(null)
+  const canvasRef  = useRef<HTMLCAï¿½GElement>(null)
   const fileRef    = useRef<HTMLInputElement>(null)
   const streamRef  = useRef<MediaStream | null>(null)
 
