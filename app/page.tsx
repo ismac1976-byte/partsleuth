@@ -61,27 +61,34 @@ export default function HomePage() {
         </Link>
       </div>
 
-      {/* Loading shimmer */}
+      {/* Loading splash */}
       {loading && (
-        <div className="space-y-3">
-          {[1,2,3].map(i => (
-            <div key={i} className="card h-24 animate-pulse bg-gray-50" />
-          ))}
+        <div className="rounded-2xl overflow-hidden relative -mx-0"
+             style={{ aspectRatio: '4/3', maxHeight: 340 }}>
+          <img src="/splash.jpg" alt="PartSleuth"
+               className="w-full h-full object-cover" />
+          <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
+          <div className="absolute bottom-0 left-0 right-0 p-5">
+            <p className="text-white/60 text-xs font-semibold tracking-widest uppercase mb-1">Loading your sets…</p>
+          </div>
         </div>
       )}
 
-      {/* Empty state */}
+      {/* Empty state with hero */}
       {!loading && sets.length === 0 && (
-        <div className="card text-center py-16 space-y-4">
-          <p className="text-6xl">🧱</p>
-          <div>
-            <p className="text-xl font-black text-brand-900">No sets yet</p>
-            <p className="text-sm text-brand-900/50 mt-1">
-              Search for a LEGO set to get started
-            </p>
+        <div className="space-y-4">
+          <div className="rounded-2xl overflow-hidden relative"
+               style={{ aspectRatio: '4/3', maxHeight: 300 }}>
+            <img src="/splash.jpg" alt="PartSleuth"
+                 className="w-full h-full object-cover" />
+            <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent" />
+            <div className="absolute bottom-0 left-0 right-0 p-5 space-y-1">
+              <p className="text-white font-black text-2xl tracking-tight">Start detecting</p>
+              <p className="text-white/70 text-sm">Add a set, load its parts, then scan your bricks</p>
+            </div>
           </div>
-          <Link href="/sets/add" className="btn-primary inline-flex items-center gap-2 mt-2 px-8">
-            Find your first set →
+          <Link href="/sets/add" className="btn-primary w-full text-center py-3.5 block text-base">
+            + Add your first set
           </Link>
         </div>
       )}
