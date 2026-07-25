@@ -129,12 +129,18 @@ def _img(b64: str) -> dict:
 
 
 def identify_crops(crops: list[str], catalog: list[str] | None = None) -> list[dict]:
-    """Preferred path: one close-up crop per piece. No localisation asked."""
-    content: list = []
+    """Preferred path: one close-up crop per piece. No localisation asked.
+
+    The instruction prompt goes BEFORE the image stream: with many images,
+    a trailing prompt causes image-index drift (answers shifted by one).
+    """
+    content: list = [{'type': 'text', 'text': _prompt_crops(catalog)}]
     for idx, crop in enumerate(crops, start=1):
         content.append({'type': 'text', 'text': f'Image {idx}:'})
         content.append(_img(crop))
-    content.append({'type': 'text', 'text': _prompt_crops(catalog)})
+    content.append({'type': 'text', 'text':
+        f'That was all {len(crops)} images. Return the JSON now — one entry '
+        f'per image, i from 1 to {len(crops)}.'})
 
     raw = _call_claude(content, max_tokens=60 + 30 * len(crops))
 
