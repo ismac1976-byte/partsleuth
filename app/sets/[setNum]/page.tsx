@@ -146,7 +146,7 @@ export default function SetDetailPage() {
       <div className="card space-y-4">
         <div className="flex gap-4 items-start">
           {/* Image */}
-          <div className="w-16 h-16 flex-shrink-0 rounded-xl bg-gray-50
+          <div className="w-24 h-24 flex-shrink-0 rounded-xl bg-gray-50
                           flex items-center justify-center overflow-hidden border border-gray-100">
             {set.imageUrl
               ? <img src={set.imageUrl} alt={set.name}
@@ -180,38 +180,26 @@ export default function SetDetailPage() {
         )}
       </div>
 
-      {/* Actions */}
+      {/* Actions — classic layout: one big red Scan button + Missing beside it */}
       {checklist.length > 0 ? (
         <div className="space-y-3">
-          {/* Primary scan actions — large, clear rows */}
-          <Link href={`/sets/${setNum}/scan?mode=camera`}
-                className="flex items-center gap-4 w-full bg-brand-900 text-white
-                           rounded-2xl px-5 py-4 shadow-md active:scale-[0.98] transition-transform">
-            <span className="text-3xl flex-shrink-0">📹</span>
-            <div className="flex-1 text-left">
-              <p className="font-black text-base leading-tight">Live Camera</p>
-              <p className="text-sm text-white/60 mt-0.5">Hold bricks up one by one</p>
-            </div>
-            <span className="text-white/30 text-2xl">›</span>
-          </Link>
-          <Link href={`/sets/${setNum}/scan?mode=photo`}
-                className="flex items-center gap-4 w-full bg-brand-900 text-white
-                           rounded-2xl px-5 py-4 shadow-md active:scale-[0.98] transition-transform">
-            <span className="text-3xl flex-shrink-0">📷</span>
-            <div className="flex-1 text-left">
-              <p className="font-black text-base leading-tight">Take Photo</p>
-              <p className="text-sm text-white/60 mt-0.5">Spread bricks out and photograph them</p>
-            </div>
-            <span className="text-white/30 text-2xl">›</span>
-          </Link>
-          {/* Secondary actions */}
-          <div className="flex gap-3 pt-1">
+          <div className="flex gap-3">
+            <Link href={`/sets/${setNum}/scan?mode=camera`}
+                  className="btn-primary flex-1 text-center text-base py-3.5">
+              📹 Scan Bricks
+            </Link>
+            <Link href={`/sets/${setNum}/scan?mode=photo`}
+                  className="btn-primary flex-1 text-center text-base py-3.5">
+              📷 Photo Bricks
+            </Link>
+          </div>
+          <div className="flex gap-3">
             <Link href={`/sets/${setNum}/missing`}
-                  className="btn-secondary flex-1 text-center text-sm py-3">
+                  className="btn-secondary flex-1 text-center text-base py-3">
               📋 Missing
             </Link>
             <a href={instructionsUrl} target="_blank" rel="noopener noreferrer"
-               className="btn-secondary flex-1 text-center text-sm py-3">
+               className="btn-secondary flex-1 text-center text-base py-3">
               📖 Instructions
             </a>
           </div>

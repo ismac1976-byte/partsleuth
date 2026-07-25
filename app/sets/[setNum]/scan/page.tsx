@@ -75,8 +75,9 @@ function downscaleFile(file: File): Promise<Captured> {
 export default function ScanPage() {
   const { setNum }   = useParams<{ setNum: string }>()
   const searchParams = useSearchParams()
-  const inputMode: InputMode =
+  const initialMode: InputMode =
     (searchParams.get('mode') as InputMode) === 'photo' ? 'photo' : 'camera'
+  const [inputMode, setInputMode] = useState<InputMode>(initialMode)
 
   const videoRef  = useRef<HTMLVideoElement>(null)
   const fileRef   = useRef<HTMLInputElement>(null)
