@@ -52,16 +52,37 @@ _PROMPT_FULL = (
     '{"pieces":[{"p":"3001","c":"Red","b":[0.1,0.2,0.3,0.4],"cf":"h"}]}'
 )
 
-# Per-crop prompt (preferred: identification only, no localisation)
-_PROMPT_CROPS = (
-    'LEGO expert. Each numbered image is a close-up of ONE LEGO piece on '
-    'white paper. Identify the piece in every image.\n'
-    'Each entry: {"i":<image number>,"p":"part#","c":"color","cf":"X"}\n'
-    + _PART_VOCAB +
-    'Include EVERY image number exactly once, in order.\n'
-    'Return ONLY valid JSON:\n'
-    '{"pieces":[{"i":1,"p":"3001","c":"Red","cf":"h"}]}'
-)
+# Per-crop prompt (preferred: identification only, no localisation).
+# When the client supplies the set's own parts catalog, identification becomes
+# multiple-choice against the real inventory — far more accurate than
+# open-vocabulary guessing, and part#/colour match the checklist exactly.
+def _prompt_crops(catalog: list[str] | None) -> str:
+    if catalog:
+        cat = '\n'.join(catalog[:120])
+        return (
+            'LEGO expert. Each numbered image is a close-up of ONE LEGO piece '
+            'on white paper.\n'
+            'CANDIDATES — the parts expected in this set (part# | name | colour):\n'
+            f'{cat}\n\n'
+            'For each image pick the best-matching candidate, copying its part# '
+            'and colour EXACTLY as written above. Study shape (studs, slopes, '
+            'brackets, curves) and colour carefully. Only if NO candidate fits, '
+            'give your own BrickLink part# and colour with cf "l".\n'
+            'Entry: {"i":<image number>,"p":"part#","c":"colour","cf":"X"}\n'
+            'cf = h(high) m(medium) l(low) n(unidentifiable)\n'
+            'Include EVERY image number exactly once, in order.\n'
+            'Return ONLY valid JSON:\n'
+            '{"pieces":[{"i":1,"p":"3005","c":"Dark Red","cf":"h"}]}'
+        )
+    return (
+        'LEGO expert. Each numbered image is a close-up of ONE LEGO piece on '
+        'white paper. Identify the piece in every image.\n'
+        'Each entry: {"i":<image number>,"p":"part#","c":"color","cf":"X"}\n'
+        + _PART_VOCAB +
+        'Include EVERY image number exactly once, in order.\n'
+        'Return ONLY valid JSON:\n'
+        '{"pieces":[{"i":1,"p":"3001","c":"Red","cf":"h"}]}'
+    )
 
 _CF_EXPAND = {'h': 'high', 'm': 'medium', 'l': 'low', 'n': 'none'}
 
@@ -99,15 +120,15 @@ def _img(b64: str) -> dict:
             'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': b64}}
 
 
-def identify_crops(crops: list[str]) -> list[dict]:
+def identify_crops(crops: list[str], catalog: list[str] | None = None) -> list[dict]:
     """Preferred path: one close-up crop per piece. No localisation asked."""
     content: list = []
     for idx, crop in enumerate(crops, start=1):
         content.append({'type': 'text', 'text': f'Image {idx}:'})
         content.append(_img(crop))
-    content.append({'type': 'text', 'text': _PROMPT_CROPS})
+    content.append({'type': 'text', 'text': _prompt_crops(catalog)})
 
-    raw = _call_claude(content, max_tokens=60 + 25 * len(crops))
+    raw = _call_claude(content, max_tokens=60 + 30 * len(crops))
 
     pieces = []
     for rp in raw:
@@ -153,7 +174,10 @@ class handler(BaseHTTPRequestHandler):
             body   = json.loads(self.rfile.read(length))
             crops  = body.get('crops')
             if isinstance(crops, list) and crops:
-                self._json(200, {'pieces': identify_crops(crops[:40])})
+                catalog = body.get('catalog')
+                if not (isinstance(catalog, list) and all(isinstance(x, str) for x in catalog)):
+                    catalog = None
+                self._json(200, {'pieces': identify_crops(crops[:40], catalog)})
                 return
             image_b64 = body.get('image_b64')
             if not image_b64:

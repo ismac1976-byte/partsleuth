@@ -51,8 +51,35 @@ const COLOUR_ALIASES: Record<string, string> = {
   'bright blue': 'blue',               'bright red': 'red',
   'bright yellow': 'yellow',           'bright green': 'green',
   'transparent': 'trans-clear',        'clear': 'trans-clear',
-  'brown': 'reddish brown',            'dark brown': 'reddish brown',
+  'brown': 'reddish brown',
   'lime green': 'lime',                'light green': 'lime',
+  'gold': 'pearl gold',                'metallic gold': 'pearl gold',
+  'silver': 'flat silver',             'metallic silver': 'flat silver',
+  'nougat': 'medium nougat',           'light brown': 'medium nougat',
+}
+
+// Strip mold-variant suffixes for fuzzy part matching: "3062b" → "3062"
+function stripVariant(p: string): string {
+  return p.replace(/[a-z]+[0-9]*$/i, '')
+}
+
+/**
+ * Compact catalog of the set's parts, sent with each scan so Claude picks
+ * from the REAL inventory (multiple-choice) instead of guessing part numbers.
+ */
+export function buildCatalog(checklist: ChecklistLine[]): string[] {
+  const seen = new Set<string>()
+  const rows: { line: string; qty: number }[] = []
+  for (const l of checklist) {
+    if (l.isSpare) continue
+    const key = `${l.partNum}|${l.colorName}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    const name = (l.partName || '').replace(/\s+/g, ' ').slice(0, 52)
+    rows.push({ line: `${l.partNum} | ${name} | ${l.colorName}`, qty: l.quantityNeeded })
+  }
+  rows.sort((a, b) => b.qty - a.qty)
+  return rows.slice(0, 120).map(r => r.line)
 }
 
 function normColor(c: string | null | undefined): string {
@@ -75,11 +102,13 @@ function buildLookup(checklist: ChecklistLine[]): Lookup {
     const ids = [...(line.bricklinkIds ?? [])]
     if (line.partNum) ids.push(line.partNum)
     const ck = normColor(line.colorName)
-    for (const pid of ids) {
+    for (const pid of [...ids, ...ids.map(stripVariant)]) {
       if (!pid) continue
       const pcKey = `${pid}|${ck}`
-      ;(byPartColor.get(pcKey) ?? byPartColor.set(pcKey, []).get(pcKey)!).push(line)
-      ;(byPart.get(pid)        ?? byPart.set(pid, []).get(pid)!).push(line)
+      const pcArr = byPartColor.get(pcKey) ?? byPartColor.set(pcKey, []).get(pcKey)!
+      if (!pcArr.includes(line)) pcArr.push(line)
+      const pArr = byPart.get(pid) ?? byPart.set(pid, []).get(pid)!
+      if (!pArr.includes(line)) pArr.push(line)
     }
   }
   return { byPartColor, byPart }
@@ -103,7 +132,9 @@ export function matchDetections(
 
     if (pn) {
       const ck   = normColor(piece.color)
-      const rows = lookup.byPartColor.get(`${pn}|${ck}`) ?? []
+      const rows = lookup.byPartColor.get(`${pn}|${ck}`)
+                ?? lookup.byPartColor.get(`${stripVariant(pn)}|${ck}`)
+                ?? []
       if (rows.length) {
         const needed = rows.filter(r =>
           (scanCounts.get(r.lineId) ?? 0) + (r.quantityFound ?? 0) < (r.quantityNeeded ?? 0))
@@ -115,7 +146,9 @@ export function matchDetections(
           status = 'have_enough'; matches = rows
         }
       } else {
-        const partRows = lookup.byPart.get(pn) ?? []
+        const partRows = lookup.byPart.get(pn)
+                      ?? lookup.byPart.get(stripVariant(pn))
+                      ?? []
         if (partRows.length) { status = 'wrong_color'; matches = partRows }
         else                 { status = 'not_in_set' }
       }

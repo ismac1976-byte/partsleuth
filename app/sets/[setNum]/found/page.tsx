@@ -30,6 +30,18 @@ export default function FoundPage() {
 
   const totalFound = found.reduce((s, l) => s + Math.min(l.quantityFound, l.quantityNeeded), 0)
 
+  // ✕ = undo this entry completely — removes it from the Found list
+  async function clearLine(line: ChecklistLine) {
+    if (ticking || line.quantityFound <= 0) return
+    setTicking(line.lineId)
+    try {
+      await updateDoc(doc(db, 'sets', setNum, 'checklist', line.lineId), {
+        quantityFound: 0,
+      })
+    } finally { setTicking(null) }
+  }
+
+  // − = remove just one
   async function removeOne(line: ChecklistLine) {
     if (ticking || line.quantityFound <= 0) return
     setTicking(line.lineId)
@@ -129,12 +141,22 @@ export default function FoundPage() {
                                  border-t-transparent rounded-full animate-spin flex-shrink-0" />
               ) : (
                 <div className="flex items-center gap-2 flex-shrink-0">
+                  {line.quantityFound > 1 && (
+                    <button
+                      onClick={() => removeOne(line)}
+                      className="w-9 h-9 rounded-full border-2 border-red-200
+                                 flex items-center justify-center
+                                 text-red-500 text-lg font-bold leading-none
+                                 hover:border-red-400 active:scale-90 transition-all"
+                      title="Remove one"
+                    >−</button>
+                  )}
                   <button
-                    onClick={() => removeOne(line)}
+                    onClick={() => clearLine(line)}
                     className="w-9 h-9 rounded-full bg-red-500 flex items-center justify-center
                                text-white text-base font-bold hover:bg-red-600 active:scale-90
                                transition-all shadow-sm"
-                    title="Remove one — I was wrong"
+                    title="Undo — remove from found"
                   >✕</button>
                   {!complete && (
                     <button

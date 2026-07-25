@@ -16,7 +16,7 @@ import { collection, onSnapshot, doc, updateDoc, increment } from 'firebase/fire
 import { db } from '@/lib/firebase'
 import { useParams, useSearchParams } from 'next/navigation'
 import type { ChecklistLine, ScanResult, Detection, DetectionStatus } from '@/lib/types'
-import { matchDetections, summarize, type RawPiece } from '@/lib/matching'
+import { matchDetections, summarize, buildCatalog, type RawPiece } from '@/lib/matching'
 import { segmentBricks, type SegmentResult } from '@/lib/segment'
 import Link from 'next/link'
 
@@ -139,7 +139,8 @@ export default function ScanPage() {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(usingCrops
-          ? { crops: seg.pieces.map(p => p.cropB64) }   // exact boxes stay on-device
+          ? { crops: seg.pieces.map(p => p.cropB64),     // exact boxes stay on-device
+              catalog: buildCatalog(checklist) }         // set's real inventory → multiple-choice ID
           : { image_b64: seg.display.b64 }),             // fallback: whole image
       })
 
