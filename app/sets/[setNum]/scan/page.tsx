@@ -73,7 +73,7 @@ export default function ScanPage() {
 
   // Live checklist subscription
   useEffect(() => {
-    return onSnapshot(collection(db, 'sets'l setNum, 'checklist'), snap => {
+    return onSnapshot(collection(db, 'sets', setNum, 'checklist'), snap => {
       setChecklist(snap.docs.map(d => d.data() as ChecklistLine))
     })
   }, [setNum])
