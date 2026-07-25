@@ -251,7 +251,7 @@ export default function ScanPage() {
       {/* ─────── CAMERA MODE ─────── */}
       {inputMode === 'camera' && (
         <div className="relative rounded-2xl overflow-hidden bg-black"
-             style={{ aspectRatio: '4/3' }}>
+             style={{ aspectRatio: '4/3', maxHeight: '56vh' }}>
 
           {/* Live video */}
           <video
@@ -349,18 +349,18 @@ export default function ScanPage() {
             <button
               onClick={() => fileRef.current?.click()}
               className="w-full rounded-2xl bg-brand-900 text-white
-                         flex flex-col items-center justify-center gap-4 py-20
+                         flex flex-col items-center justify-center gap-3 py-10
                          active:scale-[0.98] transition-transform shadow-md"
             >
-              <span className="text-6xl">📷</span>
+              <span className="text-5xl">📷</span>
               <div className="text-center">
-                <p className="font-black text-xl">Take a Photo</p>
-                <p className="text-sm text-white/60 mt-1">Spread bricks on a plain surface, then tap</p>
+                <p className="font-black text-lg">Take a Photo</p>
+                <p className="text-sm text-white/60 mt-0.5">Spread bricks on a plain surface, then tap</p>
               </div>
             </button>
           ) : isProcessing ? (
             /* Full-screen scanning state — unmissable */
-            <div className="rounded-2xl overflow-hidden bg-black relative" style={{ aspectRatio: '4/3' }}>
+            <div className="rounded-2xl overflow-hidden bg-black relative" style={{ aspectRatio: '4/3', maxHeight: '56vh' }}>
               <img
                 src={photoPreview}
                 alt="Scanning…"
@@ -379,7 +379,7 @@ export default function ScanPage() {
             /* Preview + result */
             <div className="space-y-3">
               <div className="relative rounded-2xl overflow-hidden bg-black"
-                   style={{ aspectRatio: '4/3' }}>
+                   style={{ aspectRatio: '4/3', maxHeight: '56vh' }}>
                 <img
                   src={scanState === 'result' && result?.annotatedImageB64
                     ? `data:image/jpeg;base64,${result.annotatedImageB64}`

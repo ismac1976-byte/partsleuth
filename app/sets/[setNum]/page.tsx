@@ -146,12 +146,12 @@ export default function SetDetailPage() {
       <div className="card space-y-4">
         <div className="flex gap-4 items-start">
           {/* Image */}
-          <div className="w-24 h-24 flex-shrink-0 rounded-xl bg-gray-50
+          <div className="w-16 h-16 flex-shrink-0 rounded-xl bg-gray-50
                           flex items-center justify-center overflow-hidden border border-gray-100">
             {set.imageUrl
               ? <img src={set.imageUrl} alt={set.name}
                      className="w-full h-full object-contain" />
-              : <span className="text-4xl">🧱</span>
+              : <span className="text-3xl">🧱</span>
             }
           </div>
 
