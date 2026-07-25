@@ -1,303 +1,340 @@
 """
-PartSleuth — /api/scan
-Accepts a base64-encoded photo of bricks spread on a table.
-1. OpenCV detects individual brick regions (bounding boxes).
-2. Each crop is sent to Brickognize in parallel for part identification.
-3. Results are matched against the caller-supplied checklist.
-4. Returns annotated image (base64) + structured detection data.
+PartSleuth — /api/scan  (v3: token-optimised Claude Vision)
 
-POST body (JSON):
-{
-  "image_b64": "<base64 jpeg/png>",
-  "checklist": [
-    {
-      "line_id": "3010_0",
-      "part_num": "3010",
-      "bricklink_ids": ["3010"],
-      "color_id": 0,
-      "color_name": "Black",
-      "quantity_needed": 4,
-      "quantity_found": 0
-    }, ...
-  ]
-}
+Design: maximum accuracy, minimum token usage, fastest response.
 
-Response (JSON):
-{
-  "annotated_image_b64": "<base64 jpeg>",
-  "detections": [
-    {
-      "box": [x1, y1, x2, y2],
-      "status": "needed" | "have_enough" | "not_in_set" | "unknown",
-      "top_candidate": { "id": "3010", "name": "Brick 1x4", "score": 0.82 },
-      "candidates": [...top 3...],
-      "checklist_matches": [...]
-    }, ...
-  ],
-  "summary": {
-    "total_detected": 12,
-    "needed": 8,
-    "have_enough": 2,
-    "not_in_set": 2
-  }
-}
+vs v2:
+  - Prompt:     ~600 input tokens  →  ~130  (compact field names)
+  - Response:   ~40 tok/piece      →  ~15   (single-char keys p/c/b/cf)
+  - max_tokens: 2048               →  1000  (enough for 50 pieces; faster)
+  - Image:      1200px, q85        →  800px, q75  (56% fewer pixels → fewer vision tokens)
+  - JPEG out:   q85                →  q80
+  - name field: Claude-generated   →  local dict lookup (no extra API call)
+  - Cache:      none               →  in-process SHA-1 keyed dict (free on warm lambda)
+
+POST  image_b64, checklist[]
+→     annotated_image_b64, detections[], summary{}
 """
 
-import json
-import base64
-import os
-import concurrent.futures
+import os, json, base64, re, hashlib
 from http.server import BaseHTTPRequestHandler
 
-import numpy as np
-import cv2
-import httpx
+import httpx, numpy as np, cv2
 
-BRICKOGNIZE_URL = "https://api.brickognize.com/predict/"
+ANTHROPIC_KEY   = os.environ.get('ANTHROPIC_API_KEY', '')
+REBRICKABLE_KEY = os.environ.get('REBRICKABLE_API_KEY', '')
 
+# ── Status colours (BGR) ─────────────────────────────────────────────────────
+_STATUS_BGR = {
+    'needed':      ( 94, 197,  34),
+    'have_enough': (  8, 179, 234),
+    'wrong_color': (  0, 127, 255),
+    'not_in_set':  (175, 163, 156),
+    'unknown':     (  0,   0, 220),
+}
+ALL_STATUSES = ('needed', 'have_enough', 'wrong_color', 'not_in_set', 'unknown')
 
-# ---------------------------------------------------------------------------
-# Detection helpers
-# ---------------------------------------------------------------------------
-
-def detect_bricks(img: np.ndarray) -> list[tuple[int, int, int, int]]:
-    """
-    Return bounding boxes (x1, y1, x2, y2) for each brick found in img.
-    Works best on a plain, contrasting surface (white cloth / light table).
-    """
-    h, w = img.shape[:2]
-
-    # Convert to LAB; use L channel for lighting-robust edge detection
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    l_chan = lab[:, :, 0]
-
-    # Blur → Canny edges
-    blurred = cv2.GaussianBlur(l_chan, (5, 5), 0)
-    edges = cv2.Canny(blurred, 30, 100)
-
-    # Dilate to close small gaps between brick edges
-    kernel = np.ones((7, 7), np.uint8)
-    dilated = cv2.dilate(edges, kernel, iterations=3)
-
-    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    min_area = (w * h) * 0.002   # 0.2% of image — filters out dust/noise
-    max_area = (w * h) * 0.25    # 25% — filters out the whole table surface
-
-    boxes = []
-    for c in contours:
-        area = cv2.contourArea(c)
-        if min_area < area < max_area:
-            x, y, bw, bh = cv2.boundingRect(c)
-            pad = 12
-            x1 = max(0, x - pad)
-            y1 = max(0, y - pad)
-            x2 = min(w, x + bw + pad)
-            y2 = min(h, y + bh + pad)
-            # Skip boxes that are obviously not brick-shaped (too thin/wide)
-            aspect = (x2 - x1) / max(1, (y2 - y1))
-            if 0.2 < aspect < 8.0:
-                boxes.append((x1, y1, x2, y2))
-
-    return _nms(boxes, iou_threshold=0.3)
-
-
-def _iou(a, b) -> float:
-    x1 = max(a[0], b[0]); y1 = max(a[1], b[1])
-    x2 = min(a[2], b[2]); y2 = min(a[3], b[3])
-    if x2 <= x1 or y2 <= y1:
-        return 0.0
-    inter = (x2 - x1) * (y2 - y1)
-    area_a = (a[2] - a[0]) * (a[3] - a[1])
-    area_b = (b[2] - b[0]) * (b[3] - b[1])
-    return inter / (area_a + area_b - inter)
-
-
-def _nms(boxes, iou_threshold=0.3) -> list:
-    """Non-maximum suppression: remove overlapping boxes, keep largest."""
-    if not boxes:
-        return []
-    ranked = sorted(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), reverse=True)
-    kept = []
-    while ranked:
-        best = ranked.pop(0)
-        kept.append(best)
-        ranked = [b for b in ranked if _iou(best, b) < iou_threshold]
-    return kept
-
-
-# ---------------------------------------------------------------------------
-# Brickognize
-# ---------------------------------------------------------------------------
-
-def _call_brickognize(crop_bytes: bytes) -> list[dict]:
-    """Call Brickognize with a single cropped brick image. Returns top 3."""
-    try:
-        resp = httpx.post(
-            BRICKOGNIZE_URL,
-            files={"query_image": ("brick.jpg", crop_bytes, "image/jpeg")},
-            timeout=15.0,
-        )
-        resp.raise_for_status()
-        return resp.json().get("items", [])[:3]
-    except Exception:
-        return []
-
-
-def identify_crops(crops: list[bytes]) -> list[list[dict]]:
-    """Call Brickognize for every crop in parallel (max 10 concurrent)."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
-        futures = [ex.submit(_call_brickognize, c) for c in crops]
-        return [f.result() for f in futures]
-
-
-# ---------------------------------------------------------------------------
-# Checklist matching
-# ---------------------------------------------------------------------------
-
-def build_lookup(checklist: list[dict]) -> dict[str, list[dict]]:
-    """Index checklist rows by every BrickLink ID they carry."""
-    lookup: dict[str, list[dict]] = {}
-    for item in checklist:
-        for bl_id in item.get("bricklink_ids", []):
-            lookup.setdefault(bl_id, []).append(item)
-    return lookup
-
-
-def match_status(candidate_id: str | None, lookup: dict) -> tuple[str, list]:
-    """Return (status, matching_checklist_rows)."""
-    if not candidate_id or candidate_id not in lookup:
-        return ("not_in_set" if candidate_id else "unknown"), []
-    rows = lookup[candidate_id]
-    still_needed = [r for r in rows if r["quantity_found"] < r["quantity_needed"]]
-    status = "needed" if still_needed else "have_enough"
-    return status, rows
-
-
-# ---------------------------------------------------------------------------
-# Annotation
-# ---------------------------------------------------------------------------
-
-STATUS_COLOURS = {
-    "needed":      (34, 197, 94),    # green  (RGB)
-    "have_enough": (234, 179, 8),    # yellow
-    "not_in_set":  (156, 163, 175),  # grey
-    "unknown":     (209, 213, 219),  # light grey
+# ── Local part-name lookup — avoids Rebrickable round-trip in hot path ───────
+_PART_NAMES: dict[str, str] = {
+    '3001':'Brick 2x4',    '3002':'Brick 2x3',    '3003':'Brick 2x2',
+    '3004':'Brick 1x2',    '3005':'Brick 1x1',    '3009':'Brick 1x6',
+    '3010':'Brick 1x4',    '3007':'Brick 2x8',    '3008':'Brick 1x8',
+    '2456':'Brick 2x6',    '3006':'Brick 2x10',
+    '3020':'Plate 2x4',    '3021':'Plate 2x3',    '3022':'Plate 2x2',
+    '3023':'Plate 1x2',    '3024':'Plate 1x1',    '3034':'Plate 2x8',
+    '3460':'Plate 1x8',    '3710':'Plate 1x4',    '3832':'Plate 2x10',
+    '3958':'Plate 6x6',    '2420':'Plate Corner 2x2',
+    '3068b':'Tile 2x2',    '3069b':'Tile 1x2',    '3070b':'Tile 1x1',
+    '6636':'Tile 1x6',     '4162':'Tile 1x8',     '2412b':'Tile 1x2 Grooved',
+    '4150':'Tile 2x2 Round','98138':'Tile 1x1 Round',
+    '3040b':'Slope 45 2x1','3039':'Slope 45 2x2', '3665':'Slope Inv 45 2x1',
+    '3660':'Slope Inv 45 2x2',
+    '11477':'Slope Curved 2x1','61678':'Slope Curved 4x1',
+    '3062b':'Brick 1x1 Round','3941':'Brick 2x2 Round',
+    '32523':'Technic Beam 3','32316':'Technic Beam 5','32524':'Technic Beam 7',
+    '40490':'Technic Beam 9','32525':'Technic Beam 11','32278':'Technic Beam 15',
+    '3176':'Plate 3x2 w/Bow','32028':'Plate 1x2 w/Handle',
+    '30363':'Shield 2x3',  '41855':'Bar 4x2 Curved',
 }
 
-def annotate(img: np.ndarray, boxes, detections: list[dict]) -> np.ndarray:
-    out = img.copy()
-    for box, det in zip(boxes, detections):
-        x1, y1, x2, y2 = box
-        r, g, b = STATUS_COLOURS[det["status"]]
-        colour_bgr = (b, g, r)
-        cv2.rectangle(out, (x1, y1), (x2, y2), colour_bgr, 3)
-        if det.get("top_candidate"):
-            label = det["top_candidate"]["id"]
-            cv2.putText(out, label, (x1 + 4, y1 - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, colour_bgr, 2,
-                        cv2.LINE_AA)
-    return out
+# ── Compact ↔ full key maps ──────────────────────────────────────────────────
+_CF_EXPAND = {'h': 'high', 'm': 'medium', 'l': 'low', 'n': 'none'}
+_CF_BADGE  = {'high': '', 'medium': '~', 'low': '?', 'none': '??'}
+
+# ── Colour normalisation ─────────────────────────────────────────────────────
+_COLOUR_ALIASES: dict[str, str] = {
+    'light gray':'light bluish gray',   'light grey':'light bluish gray',
+    'light bluish grey':'light bluish gray',
+    'dark gray':'dark bluish gray',     'dark grey':'dark bluish gray',
+    'dark bluish grey':'dark bluish gray',
+    'gray':'light bluish gray',         'grey':'light bluish gray',
+    'azure':'medium azure',             'medium blue':'blue',
+    'bright blue':'blue',               'bright red':'red',
+    'bright yellow':'yellow',           'bright green':'green',
+    'transparent':'trans-clear',        'clear':'trans-clear',
+    'brown':'reddish brown',            'dark brown':'reddish brown',
+    'lime green':'lime',                'light green':'lime',
+}
+def _nc(c: str | None) -> str:
+    if not c: return ''
+    return _COLOUR_ALIASES.get(c.lower().strip(), c.lower().strip())
 
 
-# ---------------------------------------------------------------------------
-# Vercel handler
-# ---------------------------------------------------------------------------
+# ── Image compression ─────────────────────────────────────────────────────────
+
+def compress_image(image_bytes: bytes, max_dim: int = 800, quality: int = 75
+                   ) -> tuple[bytes, np.ndarray]:
+    """
+    800px / q75: ~56% fewer pixels than 1200px → fewer vision tokens + faster upload.
+    Adequate resolution for LEGO part identification.
+    """
+    arr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError('Cannot decode image — must be JPEG or PNG')
+    h, w = img.shape[:2]
+    scale = min(1.0, max_dim / max(h, w))
+    if scale < 1.0:
+        img = cv2.resize(img, (int(w * scale), int(h * scale)),
+                         interpolation=cv2.INTER_AREA)
+    _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return buf.tobytes(), img
+
+
+# ── Claude Vision — compact prompt ───────────────────────────────────────────
+
+# ~130 input tokens (was ~600).  Compact single-char keys cut output ~60%.
+_PROMPT = (
+    'LEGO expert. List every piece visible — include unidentifiable ones.\n'
+    'Each entry: {"p":"part#","c":"color","b":[x1,y1,x2,y2],"cf":"X"}\n'
+    'p = BrickLink# (e.g. "3001"=Brick2x4 "3010"=Brick1x4 "3004"=Brick1x2 '
+    '"3003"=Brick2x2 "3005"=Brick1x1 "3020"=Plate2x4 "3023"=Plate1x2 '
+    '"3022"=Plate2x2 "3024"=Plate1x1 "3068b"=Tile2x2 "3069b"=Tile1x2) or null\n'
+    'c = LEGO colour (Red Blue Yellow Black White "Light Bluish Gray" '
+    '"Dark Bluish Gray" Tan Green "Dark Green" Orange "Medium Azure" '
+    '"Reddish Brown" Lime "Trans-Clear") or null\n'
+    'b = [x1,y1,x2,y2] 0-1 image fractions\n'
+    'cf = h(high) m(medium) l(low) n(unidentifiable)\n'
+    'Rules: separate touching pieces; no duplicates.\n'
+    'Return ONLY valid JSON:\n'
+    '{"pieces":[{"p":"3001","c":"Red","b":[0.1,0.2,0.3,0.4],"cf":"h"}]}'
+)
+
+# In-process result cache — avoids re-calling Claude for the same image bytes
+# (warm Vercel lambda reuse; especially useful during testing)
+_CACHE: dict[str, list] = {}
+
+
+def identify_pieces_claude(image_b64: str) -> list[dict]:
+    """
+    Single compact Claude Vision call identifies all pieces.
+    max_tokens=1000 handles 50+ pieces and signals faster than 2048.
+    Raises on any API or parse error so the caller can surface it.
+    """
+    if not ANTHROPIC_KEY:
+        raise RuntimeError('ANTHROPIC_API_KEY is not set in environment')
+
+    cache_key = hashlib.sha1(image_b64.encode()).hexdigest()
+    if cache_key in _CACHE:
+        return _CACHE[cache_key]
+
+    resp = httpx.post(
+        'https://api.anthropic.com/v1/messages',
+        headers={
+            'x-api-key': ANTHROPIC_KEY,
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json',
+        },
+        json={
+            'model': 'claude-haiku-4-5-20251001',
+            'max_tokens': 1000,
+            'messages': [{
+                'role': 'user',
+                'content': [
+                    {
+                        'type': 'image',
+                        'source': {
+                            'type': 'base64',
+                            'media_type': 'image/jpeg',
+                            'data': image_b64,
+                        },
+                    },
+                    {'type': 'text', 'text': _PROMPT},
+                ],
+            }],
+        },
+        timeout=50.0,
+    )
+
+    # Surface HTTP errors (401 bad key, 400 bad model, 429 rate-limit, etc.)
+    if resp.status_code != 200:
+        body = resp.text[:400]
+        raise RuntimeError(f'Anthropic API error {resp.status_code}: {body}')
+
+    text = resp.json()['content'][0]['text'].strip()
+    # Strip markdown code fences if model adds them despite instructions
+    text = re.sub(r'^```[a-z]*\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\s*```$',       '', text, flags=re.MULTILINE)
+
+    raw = json.loads(text).get('pieces', [])
+
+    # Expand compact keys → full schema; add local name lookup
+    pieces = []
+    for rp in raw:
+        bbox = rp.get('b', [])
+        bbox = ([max(0.0, min(1.0, float(v))) for v in bbox]
+                if len(bbox) == 4 else [0.0, 0.0, 1.0, 1.0])
+        pn   = rp.get('p')
+        cf   = _CF_EXPAND.get(rp.get('cf', 'n'), 'none')
+        pieces.append({
+            'part_num':   pn,
+            'color':      rp.get('c'),
+            'name':       _PART_NAMES.get(pn) if pn else None,
+            'confidence': cf,
+            'bbox_pct':   bbox,
+        })
+
+    _CACHE[cache_key] = pieces
+    return pieces
+
+
+# ── Checklist matching ────────────────────────────────────────────────────────
+
+def build_lookup(checklist: list[dict]) -> dict:
+    by_pc: dict[tuple, list] = {}
+    by_p:  dict[str, list]   = {}
+    for item in checklist:
+        ids: list[str] = list(item.get('bricklink_ids') or [])
+        if item.get('part_num'):
+            ids.append(str(item['part_num']))
+        ck = _nc(item.get('color_name'))
+        for pid in ids:
+            if pid:
+                by_pc.setdefault((pid, ck), []).append(item)
+                by_p.setdefault(pid, []).append(item)
+    return {'by_pc': by_pc, 'by_p': by_p}
+
+
+def match_piece(piece: dict, lookup: dict, scan_counts: dict) -> tuple[str, list]:
+    pn = piece.get('part_num')
+    if not pn:
+        return 'unknown', []
+    ck    = _nc(piece.get('color'))
+    by_pc = lookup['by_pc']
+    by_p  = lookup['by_p']
+
+    rows = by_pc.get((pn, ck), [])
+    if rows:
+        needed = [r for r in rows
+                  if (scan_counts.get(r['line_id'], 0) + r.get('quantity_found', 0))
+                     < r.get('quantity_needed', 0)]
+        if needed:
+            lid = needed[0]['line_id']
+            scan_counts[lid] = scan_counts.get(lid, 0) + 1
+            return 'needed', needed
+        return 'have_enough', rows
+
+    part_rows = by_p.get(pn, [])
+    if part_rows:
+        return 'wrong_color', part_rows
+
+    return 'not_in_set', []
+
+
+# ── Annotation ────────────────────────────────────────────────────────────────
+
+_FONT = cv2.FONT_HERSHEY_SIMPLEX
+
+def annotate(img: np.ndarray, detections: list[dict]) -> str:
+    h, w = img.shape[:2]
+    out  = img.copy()
+    for det in detections:
+        bbox = det.get('bbox_pct', [])
+        if len(bbox) != 4:
+            continue
+        x1 = max(0, int(bbox[0]*w));  y1 = max(0, int(bbox[1]*h))
+        x2 = min(w, int(bbox[2]*w));  y2 = min(h, int(bbox[3]*h))
+        if x2 <= x1 or y2 <= y1:
+            continue
+        status = det.get('status', 'unknown')
+        col    = _STATUS_BGR.get(status, (128, 128, 128))
+        bord   = 4 if status in ('needed', 'unknown') else 3
+        cv2.rectangle(out, (x1, y1), (x2, y2), col, bord)
+
+        badge = _CF_BADGE.get(det.get('confidence', 'none'), '??')
+        label = f'{badge}{det.get("part_num") or "?"}'
+        (tw, th), bl = cv2.getTextSize(label, _FONT, 0.44, 1)
+        pad = 3
+        ly  = max(y1, th + bl + pad * 2)
+        cv2.rectangle(out, (x1, ly-th-bl-pad*2), (x1+tw+pad*2, ly), col, -1)
+        cv2.putText(out, label, (x1+pad, ly-bl-pad),
+                    _FONT, 0.44, (255,255,255), 1, cv2.LINE_AA)
+
+    _, buf = cv2.imencode('.jpg', out, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    return base64.b64encode(buf.tobytes()).decode()
+
+
+# ── Handler ───────────────────────────────────────────────────────────────────
 
 class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            length = int(self.headers.get("content-length", 0))
-            body = json.loads(self.rfile.read(length))
+            length    = int(self.headers.get('content-length', 0))
+            body      = json.loads(self.rfile.read(length))
+            img_bytes = base64.b64decode(body['image_b64'])
+            checklist = body.get('checklist', [])
 
-            image_bytes = base64.b64decode(body["image_b64"])
-            checklist = body.get("checklist", [])
+            comp_bytes, img_arr = compress_image(img_bytes)
+            comp_b64 = base64.b64encode(comp_bytes).decode()
 
-            # Decode image
-            arr = np.frombuffer(image_bytes, np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-            if img is None:
-                self._error(400, "Could not decode image")
-                return
+            pieces = identify_pieces_claude(comp_b64)
 
-            # 1. Detect brick regions
-            boxes = detect_bricks(img)
+            lookup      = build_lookup(checklist)
+            scan_counts: dict = {}
+            counts      = {s: 0 for s in ALL_STATUSES}
+            detections  = []
 
-            # 2. Crop each region
-            crops = []
-            for (x1, y1, x2, y2) in boxes:
-                crop = img[y1:y2, x1:x2]
-                _, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
-                crops.append(buf.tobytes())
-
-            # 3. Identify each crop via Brickognize
-            all_candidates = identify_crops(crops)
-
-            # 4. Match against checklist
-            lookup = build_lookup(checklist)
-            detections = []
-            counts = {"needed": 0, "have_enough": 0, "not_in_set": 0, "unknown": 0}
-
-            for candidates in all_candidates:
-                top = candidates[0] if candidates else None
-                top_id = top["id"] if top else None
-                status, matches = match_status(top_id, lookup)
+            for piece in pieces:
+                status, matches = match_piece(piece, lookup, scan_counts)
                 counts[status] += 1
                 detections.append({
-                    "status": status,
-                    "top_candidate": {
-                        "id": top["id"],
-                        "name": top["name"],
-                        "score": round(top["score"], 3),
-                    } if top else None,
-                    "candidates": [
-                        {"id": c["id"], "name": c["name"], "score": round(c["score"], 3)}
-                        for c in candidates
-                    ],
-                    "checklist_matches": [
-                        {
-                            "line_id": m["line_id"],
-                            "color_name": m["color_name"],
-                            "quantity_needed": m["quantity_needed"],
-                            "quantity_found": m["quantity_found"],
-                        }
+                    **piece,
+                    'status': status,
+                    'checklist_matches': [
+                        {'line_id':         m['line_id'],
+                         'color_name':      m.get('color_name',''),
+                         'quantity_needed': m.get('quantity_needed',0),
+                         'quantity_found':  m.get('quantity_found',0)}
                         for m in matches
                     ],
                 })
 
-            # 5. Annotate image
-            annotated = annotate(img, boxes, detections)
-            _, out_buf = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            annotated_b64 = base64.b64encode(out_buf.tobytes()).decode()
-
-            # Add box coords to detections for client overlay
-            for det, box in zip(detections, boxes):
-                det["box"] = list(box)
-
-            response = {
-                "annotated_image_b64": annotated_b64,
-                "detections": detections,
-                "summary": {
-                    "total_detected": len(boxes),
-                    **counts,
-                },
-            }
-            self._json(200, response)
+            self._json(200, {
+                'annotated_image_b64': annotate(img_arr, detections),
+                'detections':          detections,
+                'summary': {'total_detected': len(detections), **counts},
+            })
 
         except Exception as e:
             self._error(500, str(e))
 
+    def do_OPTIONS(self):
+        self.send_response(200); self._cors(); self.end_headers()
+
     def _json(self, code: int, data: dict):
         body = json.dumps(data).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self.send_response(code); self._cors()
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers(); self.wfile.write(body)
 
     def _error(self, code: int, msg: str):
-        self._json(code, {"error": msg})
+        self._json(code, {'error': msg})
+
+    def _cors(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
 
     def log_message(self, *_):
-        pass  # silence Vercel logs
+        pass
