@@ -93,6 +93,20 @@ export default function HomePage() {
         </div>
       )}
 
+      {/* Whose Brick — global scanner across all sets */}
+      {!loading && sets.length > 0 && (
+        <Link href="/whose"
+              className="flex items-center gap-4 w-full bg-brand-900 text-white
+                         rounded-2xl px-5 py-4 shadow-md active:scale-[0.98] transition-transform">
+          <span className="text-3xl flex-shrink-0">🔍</span>
+          <div className="flex-1 text-left">
+            <p className="font-black text-base leading-tight">Whose Brick Is This?</p>
+            <p className="text-sm text-white/60 mt-0.5">Scan any brick — see which set needs it</p>
+          </div>
+          <span className="text-white/30 text-2xl">›</span>
+        </Link>
+      )}
+
       {/* Active sets */}
       {active.length > 0 && (
         <div className="space-y-3">
