@@ -64,14 +64,16 @@ def _prompt_crops(catalog: list[str] | None) -> str:
             'on white paper.\n'
             'CANDIDATES — the parts expected in this set (part# | name | colour):\n'
             f'{cat}\n\n'
-            'For each image: 1) decide the colour you actually see, 2) COUNT THE '
-            'STUDS and estimate the size (1x1, 1x2, 2x2, 1x4...), 3) pick the '
-            'candidate whose colour AND shape AND size all match, copying its '
-            'part# and colour EXACTLY as written above. Never pick a candidate '
-            'whose colour or size differs from what you see. Look for: brackets '
-            '(L-shaped side plates), slopes, curved tops, side holes, clips. '
-            'If no candidate matches, give your own BrickLink part# and colour, '
-            'cf "l". If unclear or multiple pieces, identify the central piece.\n'
+            'This candidate list is the COMPLETE inventory of the set.\n'
+            'For each image follow this procedure:\n'
+            '1) Decide the colour you actually see.\n'
+            '2) Shortlist ONLY the candidates in that colour.\n'
+            '3) From that shortlist pick the closest shape+size — count studs, '
+            'look for slopes, curved tops, brackets (L-profile), side holes, '
+            'clips, bars. Copy its part# and colour EXACTLY as written.\n'
+            '4) Only if NOTHING in that colour is plausible, give your own '
+            'BrickLink part# and colour with cf "l".\n'
+            'If unclear or multiple pieces, identify the central piece.\n'
             'Entry: {"i":<image number>,"p":"part#","c":"colour","cf":"X"}\n'
             'cf = h(high) m(medium) l(low) n(unidentifiable)\n'
             'Include EVERY image number exactly once, in order.\n'
@@ -140,10 +142,10 @@ def identify_crops(crops: list[str], catalog: list[str] | None = None) -> list[d
         content.append(_img(crop))
     content.append({'type': 'text', 'text':
         f'That was all {len(crops)} images. Return the JSON now — one entry '
-        f'per image, i from 1 to {len(crops)}. Remember: decide the colour '
-        f'you SEE first, then pick the candidate matching BOTH colour and '
-        f'shape — never a candidate in a different colour. Watch the '
-        f'Tan / Dark Tan / Pearl Gold and Black / Dark Bluish Gray pairs.'})
+        f'per image, i from 1 to {len(crops)}. Remember the procedure: colour '
+        f'seen → shortlist that colour → closest shape from the shortlist. '
+        f'Prefer a same-colour candidate with an imperfect shape over a '
+        f'different-colour candidate with a perfect shape.'})
 
     raw = _call_claude(content, max_tokens=60 + 30 * len(crops))
 
