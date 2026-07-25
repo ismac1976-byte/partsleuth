@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { doc, collection, onSnapshot, writeBatch, updateDoc } from 'firebase/firestore'
+import { doc, collection, onSnapshot, writeBatch, updateDoc, increment } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
 import { useParams } from 'next/navigation'
 import type { PSSet, ChecklistLine } from '@/lib/types'
@@ -33,6 +33,7 @@ export default function SetDetailPage() {
   const [isSetLoading, setSetLoad]   = useState(true)
   const [loadingParts, setLoadingParts] = useState(false)
   const [loadMsg, setLoadMsg]     = useState('')
+  const [ticking, setTicking]     = useState<string | null>(null)
 
   // Subscribe to the set document
   useEffect(() => {
@@ -68,7 +69,7 @@ export default function SetDetailPage() {
 
         const lines: ChecklistLine[] = data.results.map(apiPartToLine)
 
-        // Firestore batch limit is 500 — write in chunks of 400
+        // Firestore batch limit is 500 -- write in chunks of 400
         for (let i = 0; i < lines.length; i += 400) {
           const chunk = lines.slice(i, i + 400)
           const batch = writeBatch(db)
@@ -77,7 +78,7 @@ export default function SetDetailPage() {
           }
           await batch.commit()
           loaded += chunk.length
-          setLoadMsg(`Saved ${loaded} of ${total} parts…`)
+          setLoadMsg(`Saved ${loaded} of ${total} parts… `)
         }
 
         if (!data.next) break
@@ -92,6 +93,24 @@ export default function SetDetailPage() {
       setLoadMsg('')
     }
   }, [setNum])
+
+  async function tickOne(lineId: string) {
+    if (ticking) return
+    setTicking(lineId)
+    try {
+      await updateDoc(doc(db, 'sets', setNum, 'checklist', lineId), { quantityFound: increment(1) })
+    } finally { setTicking(null) }
+  }
+
+  async function tickAll(line: ChecklistLine) {
+    if (ticking) return
+    const still = line.quantityNeeded - line.quantityFound
+    if (still <= 0) return
+    setTicking(line.lineId)
+    try {
+      await updateDoc(doc(db, 'sets', setNum, 'checklist', line.lineId), { quantityFound: increment(still) })
+    } finally { setTicking(null) }
+  }
 
   // Derived stats
   const nonSpares  = checklist.filter(l => !l.isSpare)
@@ -211,7 +230,10 @@ export default function SetDetailPage() {
             <p className="text-xs font-semibold text-brand-900/40">{stillNeeded.length} types</p>
           </div>
           <div className="space-y-2">
-            {stillNeeded.slice(0, 12).map(line => (
+            {stillNeeded.slice(0, 12).map(line => {
+              const still = line.quantityNeeded - line.quantityFound
+              const busy  = ticking === line.lineId
+              return (
               <div key={line.lineId} className="card flex items-center gap-3 py-3">
                 <div className="w-12 h-12 flex-shrink-0 rounded-lg bg-gray-50
                                 flex items-center justify-center overflow-hidden border border-gray-100">
@@ -230,16 +252,36 @@ export default function SetDetailPage() {
                     )}
                     <span className="text-xs text-brand-900/40">{line.colorName}</span>
                   </div>
+                  <p className="text-[11px] text-brand-900/30 mt-0.5">{line.quantityFound}/{line.quantityNeeded} found</p>
                 </div>
-                <span className="text-sm font-black text-brand-500 flex-shrink-0">
-                  ×{line.quantityNeeded - line.quantityFound}
-                </span>
+                {busy ? (
+                  <span className="inline-block w-5 h-5 border-2 border-brand-500
+                                   border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                ) : (
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <button
+                      onClick={() => tickOne(line.lineId)}
+                      className="w-8 h-8 rounded-full border-2 border-gray-200
+                                 flex items-center justify-center text-brand-900/50 text-base font-bold
+                                 hover:border-brand-500 hover:text-brand-500 active:scale-90 transition-all"
+                      title="I found one"
+                    >+</button>
+                    <button
+                      onClick={() => tickAll(line)}
+                      className="w-8 h-8 rounded-full bg-green-500 flex items-center justify-center
+                                 text-white text-sm font-bold hover:bg-green-600 active:scale-90
+                                 transition-all shadow-sm"
+                      title={`I have all ${still}`}
+                    >✓</button>
+                  </div>
+                )}
               </div>
-            ))}
+              )
+            })}
             {stillNeeded.length > 12 && (
               <Link href={`/sets/${setNum}/missing`}
                     className="block card text-center py-4 text-brand-500 font-bold text-sm
-                               hover:shadow-card-hover transition-all">
+                                hover:shadow-card-hover transition-all">
                 See all {stillNeeded.length} missing parts →
               </Link>
             )}
