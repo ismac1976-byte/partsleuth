@@ -140,7 +140,10 @@ def identify_crops(crops: list[str], catalog: list[str] | None = None) -> list[d
         content.append(_img(crop))
     content.append({'type': 'text', 'text':
         f'That was all {len(crops)} images. Return the JSON now — one entry '
-        f'per image, i from 1 to {len(crops)}.'})
+        f'per image, i from 1 to {len(crops)}. Remember: decide the colour '
+        f'you SEE first, then pick the candidate matching BOTH colour and '
+        f'shape — never a candidate in a different colour. Watch the '
+        f'Tan / Dark Tan / Pearl Gold and Black / Dark Bluish Gray pairs.'})
 
     raw = _call_claude(content, max_tokens=60 + 30 * len(crops))
 
