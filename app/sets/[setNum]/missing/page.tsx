@@ -36,8 +36,21 @@ export default function MissingPage() {
     return 0
   })
 
-  // Mark all remaining quantity as found
-  const markFound = async (line: ChecklistLine) => {
+  // Add 1 to quantityFound
+  async function addOne(lineId: string) {
+    if (ticking) return
+    setTicking(lineId)
+    try {
+      await updateDoc(doc(db, 'sets', setNum, 'checklist', lineId), {
+        quantityFound: increment(1),
+      })
+    } finally {
+      setTicking(null)
+    }
+  }
+
+  // Mark all remaining as found
+  async function markAllFound(line: ChecklistLine) {
     if (ticking) return
     const still = line.quantityNeeded - line.quantityFound
     if (still <= 0) return
@@ -127,22 +140,15 @@ export default function MissingPage() {
             </Link>
           </div>
 
-          <p className="text-xs text-brand-900/40 text-center">
-            Tap a row to mark it as found manually
-          </p>
-
           {/* Missing list */}
           <div className="space-y-2">
             {sorted.map(line => {
               const still = line.quantityNeeded - line.quantityFound
+              const busy  = ticking === line.lineId
               return (
-                <button
+                <div
                   key={line.lineId}
-                  onClick={() => markFound(line)}
-                  disabled={ticking === line.lineId}
-                  className="card w-full text-left flex items-center gap-3 py-3
-                             active:scale-[0.98] transition-all
-                             hover:shadow-card-hover disabled:opacity-50"
+                  className="card flex items-center gap-3 py-3"
                 >
                   {/* Part image */}
                   <div className="w-12 h-12 flex-shrink-0 rounded-lg bg-gray-50
@@ -168,23 +174,43 @@ export default function MissingPage() {
                       )}
                       <span className="text-xs text-brand-900/40 truncate">{line.colorName}</span>
                     </div>
+                    <p className="text-[11px] text-brand-900/30 mt-0.5 font-medium">
+                      {line.quantityFound}/{line.quantityNeeded} found
+                    </p>
                   </div>
 
-                  {/* Count */}
-                  <div className="text-right flex-shrink-0 min-w-[3rem]">
-                    {ticking === line.lineId ? (
-                      <span className="inline-block w-4 h-4 border-2 border-brand-500
-                                       border-t-transparent rounded-full animate-spin" />
-                    ) : (
-                      <>
-                        <p className="text-sm font-black text-brand-500">×{still}</p>
-                        <p className="text-[10px] text-brand-900/30">
-                          {line.quantityFound}/{line.quantityNeeded}
-                        </p>
-                      </>
-                    )}
-                  </div>
-                </button>
+                  {/* Action buttons */}
+                  {busy ? (
+                    <span className="inline-block w-5 h-5 border-2 border-brand-500
+                                     border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                  ) : (
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {/* +1 button — add one at a time */}
+                      <button
+                        onClick={() => addOne(line.lineId)}
+                        className="w-9 h-9 rounded-full border-2 border-gray-200
+                                   flex items-center justify-center
+                                   text-brand-900/50 text-lg font-bold leading-none
+                                   hover:border-brand-500 hover:text-brand-500
+                                   active:scale-90 transition-all"
+                        title="I found one"
+                      >
+                        +
+                      </button>
+                      {/* Mark all found */}
+                      <button
+                        onClick={() => markAllFound(line)}
+                        className="w-9 h-9 rounded-full bg-green-500
+                                   flex items-center justify-center
+                                   text-white text-base font-bold
+                                   hover:bg-green-600 active:scale-90 transition-all shadow-sm"
+                        title={`I have all ${still}`}
+                      >
+                        ✓
+                      </button>
+                    </div>
+                  )}
+                </div>
               )
             })}
           </div>
