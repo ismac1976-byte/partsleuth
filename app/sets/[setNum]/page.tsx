@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { doc, collection, onSnapshot, writeBatch } from 'firebase/firestore'
+import { doc, collection, onSnapshot, writeBatch, updateDoc, increment } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
 import { useParams } from 'next/navigation'
 import type { PSSet, ChecklistLine } from '@/lib/types'
@@ -30,9 +30,10 @@ export default function SetDetailPage() {
 
   const [set, setSet]             = useState<PSSet | null>(null)
   const [checklist, setChecklist] = useState<ChecklistLine[]>([])
-  const [setLoading, setSetLoad]  = useState(true)
-  const [loadingParts, setLoading] = useState(false)
+  const [isSetLoading, setSetLoad]   = useState(true)
+  const [loadingParts, setLoadingParts] = useState(false)
   const [loadMsg, setLoadMsg]     = useState('')
+  const [ticking, setTicking]     = useState<string | null>(null)
 
   // Subscribe to the set document
   useEffect(() => {
@@ -51,7 +52,7 @@ export default function SetDetailPage() {
 
   // Fetch all parts pages from Rebrickable and batch-write to Firestore
   const loadParts = useCallback(async () => {
-    setLoading(true)
+    setLoadingParts(true)
     try {
       let page = 1
       let loaded = 0
@@ -83,13 +84,33 @@ export default function SetDetailPage() {
         if (!data.next) break
         page++
       }
+      // Mark the set as having parts loaded (for homepage card)
+      await updateDoc(doc(db, 'sets', setNum), { partsLoaded: true })
     } catch (e) {
       console.error('loadParts error:', e)
     } finally {
-      setLoading(false)
+      setLoadingParts(false)
       setLoadMsg('')
     }
   }, [setNum])
+
+  async function tickOne(lineId: string) {
+    if (ticking) return
+    setTicking(lineId)
+    try {
+      await updateDoc(doc(db, 'sets', setNum, 'checklist', lineId), { quantityFound: increment(1) })
+    } finally { setTicking(null) }
+  }
+
+  async function tickAll(line: ChecklistLine) {
+    if (ticking) return
+    const still = line.quantityNeeded - line.quantityFound
+    if (still <= 0) return
+    setTicking(line.lineId)
+    try {
+      await updateDoc(doc(db, 'sets', setNum, 'checklist', line.lineId), { quantityFound: increment(still) })
+    } finally { setTicking(null) }
+  }
 
   // Derived stats
   const nonSpares  = checklist.filter(l => !l.isSpare)
@@ -99,44 +120,60 @@ export default function SetDetailPage() {
     .filter(l => l.quantityFound < l.quantityNeeded)
     .sort((a, b) => b.quantityNeeded - a.quantityNeeded)
 
-  if (setLoading) {
-    return <div className="text-center py-20 text-gray-400">Loading…</div>
+  if (isSetLoading) {
+    return (
+      <div className="space-y-4 pt-2">
+        <div className="card h-32 animate-pulse bg-gray-50" />
+        <div className="card h-14 animate-pulse bg-gray-50" />
+      </div>
+    )
   }
   if (!set) {
-    return <div className="text-center py-20 text-gray-500">Set not found</div>
+    return <div className="card text-center py-16 text-brand-900/50">Set not found</div>
   }
 
   return (
-    <div className="space-y-6">
-      <Link href="/" className="text-sm text-gray-400 hover:text-gray-600">← Your Sets</Link>
+    <div className="space-y-5">
+      <Link href="/" className="btn-ghost text-sm inline-flex items-center gap-1 -ml-2">
+        ← Your Sets
+      </Link>
 
       {/* Set summary card */}
-      <div className="card flex gap-4 items-center">
-        {set.imageUrl ? (
-          <img src={set.imageUrl} alt={set.name}
-               className="w-24 h-24 object-contain rounded-xl bg-gray-50 flex-shrink-0" />
-        ) : (
-          <div className="w-24 h-24 bg-gray-50 rounded-xl flex-shrink-0
-                          flex items-center justify-center text-3xl">🧱</div>
-        )}
-        <div className="flex-1 min-w-0">
-          <h1 className="text-lg font-bold text-brand-900 leading-tight">{set.name}</h1>
-          <p className="text-sm text-gray-400 mt-0.5">
-            {set.setNum} · {set.year} · {set.totalParts.toLocaleString()} pieces
-          </p>
-          {checklist.length > 0 && (
-            <div className="mt-3 space-y-1">
-              <div className="flex justify-between text-sm">
-                <span className="text-gray-500">{typesFound} / {nonSpares.length} types</span>
-                <span className="font-bold text-brand-500">{pct}%</span>
-              </div>
-              <div className="h-2 bg-gray-100 rounded-full overflow-hidden">
-                <div className="h-full bg-status-needed rounded-full transition-all duration-500"
-                     style={{ width: `${pct}%` }} />
-              </div>
-            </div>
-          )}
+      <div className="card space-y-4">
+        <div className="flex gap-4 items-start">
+          {/* Image */}
+          <div className="w-24 h-24 flex-shrink-0 rounded-xl bg-gray-50
+                          flex items-center justify-center overflow-hidden border border-gray-100">
+            {set.imageUrl
+              ? <img src={set.imageUrl} alt={set.name}
+                     className="w-full h-full object-contain" />
+              : <span className="text-4xl">🧱</span>
+            }
+          </div>
+
+          {/* Title + meta */}
+          <div className="flex-1 min-w-0">
+            <h1 className="text-lg font-black text-brand-900 leading-tight">{set.name}</h1>
+            <p className="text-sm text-brand-900/40 mt-1 font-medium">
+              {set.setNum} · {set.year} · {set.totalParts.toLocaleString()} pieces
+            </p>
+          </div>
         </div>
+
+        {/* Progress (shown once checklist is loaded) */}
+        {checklist.length > 0 && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-brand-900/50 font-medium">
+                {typesFound} of {nonSpares.length} part types found
+              </p>
+              <p className="text-2xl font-black text-brand-500">{pct}%</p>
+            </div>
+            <div className="progress-track">
+              <div className="progress-fill" style={{ width: `${pct}%` }} />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Actions */}
@@ -147,61 +184,104 @@ export default function SetDetailPage() {
             📷  Scan Bricks
           </Link>
           <Link href={`/sets/${setNum}/missing`}
-                className="btn-secondary px-5 text-sm">
-            Missing
+                className="btn-secondary px-5">
+            📋 Missing
           </Link>
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-3">
           <button
             onClick={loadParts}
             disabled={loadingParts}
             className="btn-primary w-full text-base py-4"
           >
-            {loadingParts ? (loadMsg || 'Loading parts…') : '📋  Load Parts List'}
+            {loadingParts ? (
+              <span className="flex items-center justify-center gap-2">
+                <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent
+                                 rounded-full animate-spin" />
+                {loadMsg || 'Loading parts…'}
+              </span>
+            ) : '📋  Load Parts List'}
           </button>
-          <p className="text-xs text-gray-400 text-center">
-            Fetches the full inventory from Rebrickable — needed before scanning
-          </p>
+          <div className="card bg-lego-cream border-0 py-4 text-center space-y-1">
+            <p className="text-sm font-semibold text-brand-900/60">What does this do?</p>
+            <p className="text-xs text-brand-900/40">
+              Downloads the full parts inventory from Rebrickable so you can scan and track pieces.
+              Only needed once per set.
+            </p>
+          </div>
         </div>
       )}
 
-      {/* Complete */}
+      {/* Set complete 🎉 */}
       {checklist.length > 0 && stillNeeded.length === 0 && (
-        <div className="card text-center py-10 space-y-2">
-          <p className="text-5xl">🎉</p>
-          <p className="text-xl font-bold">Set Complete!</p>
-          <p className="text-sm text-gray-400">All parts accounted for</p>
+        <div className="card text-center py-12 space-y-3">
+          <p className="text-6xl">🎉</p>
+          <p className="text-2xl font-black text-brand-900">Set Complete!</p>
+          <p className="text-sm text-brand-900/50">Every part is accounted for</p>
         </div>
       )}
 
-      {/* Still needed list */}
+      {/* Still needed preview */}
       {stillNeeded.length > 0 && (
-        <div>
-          <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-3">
-            Still Needed — {stillNeeded.length} part types
-          </h2>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="section-label">Still needed</p>
+            <p className="text-xs font-semibold text-brand-900/40">{stillNeeded.length} types</p>
+          </div>
           <div className="space-y-2">
-            {stillNeeded.slice(0, 15).map(line => (
+            {stillNeeded.slice(0, 12).map(line => {
+              const still = line.quantityNeeded - line.quantityFound
+              const busy  = ticking === line.lineId
+              return (
               <div key={line.lineId} className="card flex items-center gap-3 py-3">
-                {line.partImgUrl ? (
-                  <img src={line.partImgUrl} alt={line.partNum}
-                       className="w-10 h-10 object-contain flex-shrink-0" />
-                ) : (
-                  <div className="w-10 h-10 bg-gray-100 rounded flex-shrink-0" />
-                )}
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium truncate">{line.partName || line.partNum}</p>
-                  <p className="text-xs text-gray-400">{line.colorName}</p>
+                <div className="w-12 h-12 flex-shrink-0 rounded-lg bg-gray-50
+                                flex items-center justify-center overflow-hidden border border-gray-100">
+                  {line.partImgUrl
+                    ? <img src={line.partImgUrl} alt={line.partNum}
+                           className="w-full h-full object-contain" />
+                    : <span className="text-xs text-brand-900/30">{line.partNum}</span>
+                  }
                 </div>
-                <span className="text-sm font-semibold text-status-needed flex-shrink-0">
-                  {line.quantityFound}/{line.quantityNeeded}
-                </span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold truncate">{line.partName || line.partNum}</p>
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    {line.colorRgb && (
+                      <span className="w-3 h-3 rounded-sm border border-gray-200 flex-shrink-0"
+                            style={{ backgroundColor: `#${line.colorRgb}` }} />
+                    )}
+                    <span className="text-xs text-brand-900/40">{line.colorName}</span>
+                  </div>
+                  <p className="text-[11px] text-brand-900/30 mt-0.5">{line.quantityFound}/{line.quantityNeeded} found</p>
+                </div>
+                {busy ? (
+                  <span className="inline-block w-5 h-5 border-2 border-brand-500
+                                   border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                ) : (
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <button
+                      onClick={() => tickOne(line.lineId)}
+                      className="w-8 h-8 rounded-full border-2 border-gray-200
+                                 flex items-center justify-center text-brand-900/50 text-base font-bold
+                                 hover:border-brand-500 hover:text-brand-500 active:scale-90 transition-all"
+                      title="I found one"
+                    >+</button>
+                    <button
+                      onClick={() => tickAll(line)}
+                      className="w-8 h-8 rounded-full bg-green-500 flex items-center justify-center
+                                 text-white text-sm font-bold hover:bg-green-600 active:scale-90
+                                 transition-all shadow-sm"
+                      title={`I have all ${still}`}
+                    >✓</button>
+                  </div>
+                )}
               </div>
-            ))}
-            {stillNeeded.length > 15 && (
+              )
+            })}
+            {stillNeeded.length > 12 && (
               <Link href={`/sets/${setNum}/missing`}
-                    className="block text-center text-sm text-brand-500 py-2">
+                    className="block card text-center py-4 text-brand-500 font-bold text-sm
+                               hover:shadow-card-hover transition-all">
                 See all {stillNeeded.length} missing parts →
               </Link>
             )}

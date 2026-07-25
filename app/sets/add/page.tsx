@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { doc, setDoc, serverTimestamp } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
@@ -14,23 +14,34 @@ interface SetResult {
   set_img_url: string | null
 }
 
+const SEARCH_TIPS = [
+  { icon: '🏰', label: 'Hogwarts Castle' },
+  { icon: '🚀', label: 'Millennium Falcon' },
+  { icon: '👭', label: 'Friends Café' },
+  { icon: '🏙️', label: 'City Police Station' },
+  { icon: '⚙️', label: 'Technic Bugatti' },
+]
+
 export default function AddSetPage() {
   const router = useRouter()
-  const [query, setQuery]     = useState('')
-  const [results, setResults] = useState<SetResult[]>([])
-  const [loading, setLoading] = useState(false)
-  const [adding, setAdding]   = useState<string | null>(null)
-  const [error, setError]     = useState('')
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [query, setQuery]       = useState('')
+  const [results, setResults]   = useState<SetResult[]>([])
+  const [loading, setLoading]   = useState(false)
+  const [adding, setAdding]     = useState<string | null>(null)
+  const [error, setError]       = useState('')
   const [searched, setSearched] = useState(false)
 
-  const search = useCallback(async () => {
-    if (!query.trim()) return
+  const search = useCallback(async (q?: string) => {
+    const term = (q ?? query).trim()
+    if (!term) return
+    if (q) setQuery(q)
     setLoading(true)
     setError('')
     setResults([])
     setSearched(false)
     try {
-      const resp = await fetch(`/api/find-set?q=${encodeURIComponent(query.trim())}`)
+      const resp = await fetch(`/api/find-set?q=${encodeURIComponent(term)}`)
       const data = await resp.json()
       setResults(data.results ?? [])
       setSearched(true)
@@ -62,52 +73,90 @@ export default function AddSetPage() {
 
   return (
     <div className="space-y-6">
+
       {/* Header */}
-      <div className="flex items-center gap-3">
-        <Link href="/" className="text-gray-400 hover:text-gray-600 text-sm">← Back</Link>
-        <h1 className="text-2xl font-bold text-brand-900">Find a Set</h1>
+      <div className="flex items-center gap-3 pt-1">
+        <Link href="/" className="btn-ghost text-sm px-2 py-1">
+          ← Back
+        </Link>
+        <h1 className="text-2xl font-black text-brand-900">Find a Set</h1>
       </div>
 
-      {/* Search bar */}
-      <div className="flex gap-2">
-        <input
-          type="text"
-          value={query}
-          onChange={e => setQuery(e.target.value)}
-          onKeyDown={e => e.key === 'Enter' && !loading && search()}
-          placeholder="e.g. Hogwarts Castle, Millennium Falcon…"
-          className="flex-1 rounded-2xl border border-gray-200 bg-white px-4 py-3 text-base
-                     placeholder:text-gray-300 focus:outline-none focus:border-brand-500
-                     focus:ring-1 focus:ring-brand-500"
-          autoFocus
-        />
-        <button
-          onClick={search}
-          disabled={loading || !query.trim()}
-          className="btn-primary px-5 text-sm"
-        >
-          {loading ? '…' : 'Search'}
-        </button>
+      {/* Search box */}
+      <div className="space-y-2">
+        <div className="flex gap-2">
+          <input
+            ref={inputRef}
+            type="search"
+            inputMode="search"
+            value={query}
+            onChange={e => setQuery(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && !loading && search()}
+            placeholder="Set name or number…"
+            className="input-base flex-1"
+            autoFocus
+            autoComplete="off"
+          />
+          <button
+            onClick={() => search()}
+            disabled={loading || !query.trim()}
+            className="btn-primary px-6 flex-shrink-0"
+          >
+            {loading
+              ? <span className="inline-block w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+              : 'Search'
+            }
+          </button>
+        </div>
+        <p className="text-xs text-brand-900/40 px-1">
+          Try a name, theme, or set number (e.g. 75969)
+        </p>
       </div>
 
-      {/* Loading state */}
+      {/* Quick-search chips (shown before first search) */}
+      {!searched && !loading && (
+        <div className="space-y-3">
+          <p className="section-label">Try searching for</p>
+          <div className="flex flex-wrap gap-2">
+            {SEARCH_TIPS.map(tip => (
+              <button
+                key={tip.label}
+                onClick={() => search(tip.label)}
+                className="flex items-center gap-1.5 px-3 py-2 bg-white rounded-xl
+                           border border-gray-200 text-sm font-medium text-brand-900/70
+                           active:scale-95 transition-all shadow-sm"
+              >
+                <span>{tip.icon}</span>
+                <span>{tip.label}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Loading shimmer */}
       {loading && (
-        <div className="text-center py-10 text-gray-400">
-          <p className="text-4xl mb-2">🔍</p>
-          <p>Searching…</p>
+        <div className="space-y-3">
+          {[1,2,3,4].map(i => (
+            <div key={i} className="card h-24 animate-pulse bg-gray-50" />
+          ))}
         </div>
       )}
 
       {/* Error */}
       {error && !loading && (
-        <p className="text-red-500 text-sm text-center">{error}</p>
+        <div className="card bg-red-50 border-red-100 py-6 text-center space-y-1">
+          <p className="text-2xl">😕</p>
+          <p className="font-semibold text-red-700">{error}</p>
+          <p className="text-xs text-red-500">Try searching by set number, e.g. "75969"</p>
+        </div>
       )}
 
       {/* Results */}
       {!loading && results.length > 0 && (
         <div className="space-y-3">
-          <p className="text-xs text-gray-400 uppercase tracking-wide font-semibold">
-            {results.length} results — tap one to add it
+          <p className="section-label">
+            {results.length} result{results.length !== 1 ? 's' : ''} — tap to add
           </p>
           {results.map(set => (
             <button
@@ -115,40 +164,51 @@ export default function AddSetPage() {
               onClick={() => addSet(set)}
               disabled={!!adding}
               className="card w-full text-left flex gap-4 items-center
-                         hover:border-brand-500 hover:shadow-md transition-all
-                         active:scale-[0.99] disabled:opacity-60"
+                         hover:shadow-card-hover transition-all
+                         active:scale-[0.98] disabled:opacity-50"
             >
               {/* Thumbnail */}
-              <div className="w-20 h-20 flex-shrink-0 rounded-xl bg-gray-50 overflow-hidden flex items-center justify-center">
+              <div className="w-20 h-20 flex-shrink-0 rounded-xl bg-gray-50
+                              overflow-hidden flex items-center justify-center border border-gray-100">
                 {set.set_img_url
-                  ? <img src={set.set_img_url} alt={set.name} className="w-full h-full object-contain" />
+                  ? <img src={set.set_img_url} alt={set.name}
+                         className="w-full h-full object-contain" />
                   : <span className="text-3xl">🧱</span>
                 }
               </div>
 
               {/* Info */}
               <div className="flex-1 min-w-0">
-                <p className="font-semibold text-gray-900 leading-snug">{set.name}</p>
-                <p className="text-sm text-gray-400 mt-0.5">
-                  {set.set_num} · {set.year} · {set.num_parts.toLocaleString()} pieces
+                <p className="font-bold text-brand-900 leading-snug line-clamp-2">
+                  {set.name}
+                </p>
+                <p className="text-sm text-brand-900/40 mt-0.5">
+                  {set.set_num} · {set.year} · {set.num_parts.toLocaleString()} pcs
                 </p>
               </div>
 
               {/* CTA */}
-              <div className="flex-shrink-0 text-brand-500 font-semibold text-sm">
-                {adding === set.set_num ? 'Adding…' : 'Add →'}
+              <div className="flex-shrink-0">
+                {adding === set.set_num ? (
+                  <span className="inline-block w-5 h-5 border-2 border-brand-500
+                                   border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <span className="text-brand-500 font-black text-lg">+</span>
+                )}
               </div>
             </button>
           ))}
         </div>
       )}
 
-      {/* Empty state after search */}
+      {/* Empty state */}
       {!loading && searched && results.length === 0 && !error && (
-        <div className="card text-center py-10 space-y-2">
-          <p className="text-3xl">😕</p>
-          <p className="font-semibold">Nothing found for "{query}"</p>
-          <p className="text-sm text-gray-400">Try the set number, e.g. "75969"</p>
+        <div className="card text-center py-12 space-y-3">
+          <p className="text-5xl">🔍</p>
+          <p className="font-bold text-brand-900">Nothing found for "{query}"</p>
+          <p className="text-sm text-brand-900/50">
+            Try the exact set number, e.g. "75969"
+          </p>
         </div>
       )}
     </div>
