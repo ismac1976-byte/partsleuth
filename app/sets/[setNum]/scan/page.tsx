@@ -149,8 +149,6 @@ export default function ScanPage() {
     setResult(null)
     setPreviewUrl(prev => { if (prev) URL.revokeObjectURL(prev); return null })
   }
-uctURL(prev); return null })
-  }
 
   // ── Render ──
 
