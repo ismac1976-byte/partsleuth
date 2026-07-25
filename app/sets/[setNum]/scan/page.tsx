@@ -511,6 +511,9 @@ function StatCard({
 async function persistFinds(setNum: string, detections: Detection[]) {
   const counts: Record<string, number> = {}
   for (const det of detections) {
+    // Only auto-tick confident identifications — low-confidence guesses
+    // stay visible in the results but never corrupt the checklist.
+    if (det.confidence === 'low' || det.confidence === 'none') continue
     if (det.status === 'needed' && det.checklistMatches.length > 0) {
       const lineId = det.checklistMatches[0].lineId
       counts[lineId] = (counts[lineId] ?? 0) + 1
