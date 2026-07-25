@@ -63,6 +63,39 @@ function stripVariant(p: string): string {
   return p.replace(/[a-z]+[0-9]*$/i, '')
 }
 
+// Colours that vision models routinely confuse under real lighting.
+// Used ONLY when the part number matches a single-colour checklist entry —
+// the exact part number (Brickognize-backed) is the strong signal there.
+const NEAR_COLOURS: Record<string, string[]> = {
+  'white':             ['light bluish gray', 'light aqua'],
+  'light bluish gray': ['white', 'dark bluish gray', 'flat silver'],
+  'dark bluish gray':  ['black', 'light bluish gray', 'dark purple'],
+  'black':             ['dark bluish gray', 'dark brown', 'dark blue'],
+  'medium azure':      ['light aqua', 'dark azure', 'blue'],
+  'dark azure':        ['medium azure', 'blue'],
+  'light aqua':        ['medium azure', 'white'],
+  'reddish brown':     ['medium nougat', 'dark brown', 'dark orange'],
+  'medium nougat':     ['reddish brown', 'tan', 'dark tan'],
+  'dark brown':        ['reddish brown', 'black'],
+  'tan':               ['dark tan', 'medium nougat', 'pearl gold'],
+  'dark tan':          ['tan', 'medium nougat'],
+  'pearl gold':        ['tan', 'dark tan', 'flat silver'],
+  'flat silver':       ['light bluish gray', 'pearl gold'],
+  'orange':            ['dark orange', 'bright light orange'],
+  'dark orange':       ['orange', 'reddish brown'],
+  'bright light orange': ['orange', 'yellow'],
+  'blue':              ['dark blue', 'medium azure'],
+  'dark blue':         ['blue', 'black'],
+  'red':               ['dark red'],
+  'dark red':          ['red', 'reddish brown'],
+  'dark purple':       ['dark bluish gray', 'dark blue'],
+}
+
+function coloursNear(a: string, b: string): boolean {
+  if (a === b) return true
+  return NEAR_COLOURS[a]?.includes(b) ?? false
+}
+
 /**
  * Compact catalog of the set's parts, sent with each scan so Claude picks
  * from the REAL inventory (multiple-choice) instead of guessing part numbers.
@@ -132,9 +165,18 @@ export function matchDetections(
 
     if (pn) {
       const ck   = normColor(piece.color)
-      const rows = lookup.byPartColor.get(`${pn}|${ck}`)
-                ?? lookup.byPartColor.get(`${stripVariant(pn)}|${ck}`)
-                ?? []
+      let rows = lookup.byPartColor.get(`${pn}|${ck}`)
+              ?? lookup.byPartColor.get(`${stripVariant(pn)}|${ck}`)
+              ?? []
+      // Near-colour rescue: exact part number matching lines in exactly ONE
+      // colour, and the seen colour is a known confusion pair of it → match.
+      if (!rows.length) {
+        const partRows = lookup.byPart.get(pn) ?? lookup.byPart.get(stripVariant(pn)) ?? []
+        const colours = Array.from(new Set(partRows.map(r => normColor(r.colorName))))
+        if (colours.length === 1 && coloursNear(ck, colours[0])) {
+          rows = partRows
+        }
+      }
       if (rows.length) {
         const needed = rows.filter(r =>
           (scanCounts.get(r.lineId) ?? 0) + (r.quantityFound ?? 0) < (r.quantityNeeded ?? 0))
