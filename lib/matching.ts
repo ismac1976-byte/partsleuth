@@ -215,6 +215,100 @@ export function matchDetections(
   })
 }
 
+// ── Single-brick live mode ───────────────────────────────────────────────────
+
+export interface BKCandidate { part_num: string; score: number }
+
+export interface SingleResult {
+  status: DetectionStatus
+  line: ChecklistLine | null
+  partNum: string | null
+  colourDist: number          // weighted RGB distance to the matched line's colour
+  score: number               // Brickognize confidence for the chosen part
+}
+
+/** Weighted RGB distance (green weighted highest, like human vision). */
+function rgbDist(a: [number, number, number], b: [number, number, number]): number {
+  const dr = a[0] - b[0], dg = a[1] - b[1], db = a[2] - b[2]
+  return Math.sqrt((2 * dr * dr + 4 * dg * dg + 3 * db * db) / 9)
+}
+
+function hexToRgb(hex: string): [number, number, number] | null {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim())
+  if (!m) return null
+  const v = parseInt(m[1], 16)
+  return [(v >> 16) & 255, (v >> 8) & 255, v & 255]
+}
+
+function linesForPart(partId: string, checklist: ChecklistLine[]): ChecklistLine[] {
+  const sid = stripVariant(partId)
+  return checklist.filter(l => {
+    if (l.isSpare) return false
+    const ids = [l.partNum, ...(l.bricklinkIds ?? [])].filter(Boolean) as string[]
+    return ids.some(id => id === partId || stripVariant(id) === sid)
+  })
+}
+
+/**
+ * Resolve one Brickognize candidate list + an observed pixel colour against
+ * the checklist. Prefers candidates that exist in the set; colour picks the
+ * nearest checklist line by true RGB distance.
+ */
+export function matchSingle(
+  candidates: BKCandidate[],
+  rgb: [number, number, number] | null,
+  checklist: ChecklistLine[],
+): SingleResult {
+  if (!candidates.length) {
+    return { status: 'unknown', line: null, partNum: null, colourDist: -1, score: 0 }
+  }
+
+  // Prefer the best-scoring candidate that's in the set (score ≥ 0.15);
+  // otherwise the top candidate overall.
+  let chosen = candidates[0]
+  let lines  = linesForPart(chosen.part_num, checklist)
+  if (!lines.length) {
+    for (const c of candidates) {
+      if (c.score < 0.15) break
+      const ls = linesForPart(c.part_num, checklist)
+      if (ls.length) { chosen = c; lines = ls; break }
+    }
+  }
+
+  if (!lines.length) {
+    return {
+      status: chosen.score >= 0.35 ? 'not_in_set' : 'unknown',
+      line: null, partNum: chosen.part_num, colourDist: -1, score: chosen.score,
+    }
+  }
+
+  // Colour: nearest line by RGB (or the first still-needed line if no colour)
+  let line = lines[0]
+  let dist = -1
+  if (rgb) {
+    let best = Infinity
+    for (const l of lines) {
+      const lrgb = hexToRgb(l.colorRgb)
+      if (!lrgb) continue
+      const d = rgbDist(rgb, lrgb)
+      if (d < best) { best = d; line = l }
+    }
+    dist = best === Infinity ? -1 : best
+  } else {
+    line = lines.find(l => l.quantityFound < l.quantityNeeded) ?? lines[0]
+  }
+
+  // Very far from every colour the set stocks this part in → wrong colour
+  // (e.g. a blue 3001 when the set only has it in red).
+  if (dist >= 0 && dist > 95) {
+    return { status: 'wrong_color', line, partNum: chosen.part_num, colourDist: dist, score: chosen.score }
+  }
+
+  const status: DetectionStatus =
+    line.quantityFound < line.quantityNeeded ? 'needed' : 'have_enough'
+  return { status, line, partNum: chosen.part_num, colourDist: dist, score: chosen.score }
+}
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 
 export function summarize(detections: Detection[]) {

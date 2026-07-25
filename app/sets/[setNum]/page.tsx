@@ -193,10 +193,16 @@ export default function SetDetailPage() {
       {/* Actions — classic layout: one big red Scan button + Missing beside it */}
       {checklist.length > 0 ? (
         <div className="space-y-3">
-          <Link href={`/sets/${setNum}/scan?mode=photo`}
-                className="btn-primary w-full text-center text-base py-3.5 block">
-            📷 Photo Bricks
-          </Link>
+          <div className="flex gap-3">
+            <Link href={`/sets/${setNum}/scan?mode=single`}
+                  className="btn-primary flex-1 text-center text-base py-3.5">
+              🧱 Single Brick
+            </Link>
+            <Link href={`/sets/${setNum}/scan?mode=photo`}
+                  className="btn-primary flex-1 text-center text-base py-3.5">
+              📷 Brick Pile
+            </Link>
+          </div>
           <div className="flex gap-3">
             <Link href={`/sets/${setNum}/missing`}
                   className="btn-secondary flex-1 text-center text-base py-3">

@@ -16,12 +16,16 @@ import { collection, onSnapshot, doc, updateDoc, increment } from 'firebase/fire
 import { db } from '@/lib/firebase'
 import { useParams, useSearchParams } from 'next/navigation'
 import type { ChecklistLine, ScanResult, Detection, DetectionStatus } from '@/lib/types'
-import { matchDetections, summarize, buildCatalog, type RawPiece } from '@/lib/matching'
+import {
+  matchDetections, summarize, buildCatalog, matchSingle,
+  type RawPiece, type BKCandidate, type SingleResult,
+} from '@/lib/matching'
 import { segmentBricks, type SegmentResult } from '@/lib/segment'
+import { dominantColour, foregroundFraction, frameSignature, signatureDiff } from '@/lib/colour'
 import Link from 'next/link'
 
 type ScanState = 'idle' | 'processing' | 'result' | 'error'
-type InputMode = 'camera' | 'photo'
+type InputMode = 'single' | 'photo'
 
 // ── Status display config ────────────────────────────────────────────────────
 
@@ -62,22 +66,18 @@ function segmentFile(file: File): Promise<SegmentResult> {
 export default function ScanPage() {
   const { setNum }   = useParams<{ setNum: string }>()
   const searchParams = useSearchParams()
-  const initialMode: InputMode =
-    (searchParams.get('mode') as InputMode) === 'photo' ? 'photo' : 'camera'
-  const [inputMode, setInputMode] = useState<InputMode>(initialMode)
+  const modeParam    = searchParams.get('mode')
+  const initialMode: InputMode = modeParam === 'photo' ? 'photo' : 'single'
+  const [inputMode] = useState<InputMode>(initialMode)
 
-  const videoRef  = useRef<HTMLVideoElement>(null)
-  const fileRef   = useRef<HTMLInputElement>(null)
-  const streamRef = useRef<MediaStream | null>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
 
-  const [checklist,   setChecklist]   = useState<ChecklistLine[]>([])
-  const [scanState,   setScanState]   = useState<ScanState>('idle')
-  const [captured,    setCaptured]    = useState<Captured | null>(null)
-  const [result,      setResult]      = useState<ScanResult | null>(null)
-  const [errorMsg,    setErrorMsg]    = useState('')
-  const [cameraReady, setCameraReady] = useState(false)
-  const [cameraError, setCameraError] = useState('')
-  const [elapsed,     setElapsed]     = useState(0)
+  const [checklist, setChecklist] = useState<ChecklistLine[]>([])
+  const [scanState, setScanState] = useState<ScanState>('idle')
+  const [captured,  setCaptured]  = useState<Captured | null>(null)
+  const [result,    setResult]    = useState<ScanResult | null>(null)
+  const [errorMsg,  setErrorMsg]  = useState('')
+  const [elapsed,   setElapsed]   = useState(0)
 
   // Live checklist subscription
   useEffect(() => {
@@ -85,37 +85,6 @@ export default function ScanPage() {
       setChecklist(snap.docs.map(d => d.data() as ChecklistLine))
     })
   }, [setNum])
-
-  // Camera lifecycle
-  useEffect(() => {
-    if (inputMode !== 'camera') return
-    let cancelled = false
-
-    async function startCamera() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
-          audio: false,
-        })
-        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return }
-        streamRef.current = stream
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream
-          setCameraReady(true)
-        }
-      } catch {
-        if (!cancelled) setCameraError("Can't access camera — please allow camera permission and reload.")
-      }
-    }
-
-    startCamera()
-    return () => {
-      cancelled = true
-      streamRef.current?.getTracks().forEach(t => t.stop())
-      setCameraReady(false)
-      setCameraError('')
-    }
-  }, [inputMode])
 
   // Elapsed-seconds ticker while scanning
   useEffect(() => {
@@ -183,12 +152,6 @@ export default function ScanPage() {
     }
   }, [checklist, setNum])
 
-  function handleCameraScan() {
-    const v = videoRef.current
-    if (!v || !cameraReady) return
-    runScan(segmentBricks(v, v.videoWidth, v.videoHeight))
-  }
-
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
@@ -212,7 +175,6 @@ export default function ScanPage() {
   // ── Render ──
 
   const isProcessing = scanState === 'processing'
-  const showLiveCamera = inputMode === 'camera' && scanState === 'idle'
 
   return (
     <div className="space-y-4">
@@ -221,7 +183,7 @@ export default function ScanPage() {
       <div className="flex items-center gap-3 pt-1">
         <Link href={`/sets/${setNum}`} className="btn-ghost text-sm -ml-2">← Back</Link>
         <h1 className="text-2xl font-black text-brand-900">
-          {inputMode === 'camera' ? '📹 Live Camera' : '📷 Take Photo'}
+          {inputMode === 'single' ? '🧱 Single Brick' : '📷 Brick Pile'}
         </h1>
       </div>
 
@@ -245,44 +207,9 @@ export default function ScanPage() {
         className="hidden"
       />
 
-      {/* ── LIVE CAMERA (idle only) ── */}
-      {inputMode === 'camera' && (
-        <div className={showLiveCamera ? '' : 'hidden'}>
-          <div className="relative rounded-2xl overflow-hidden bg-black mx-auto flex justify-center">
-            {/* object-contain + no forced aspect: what you see is exactly
-                the frame that gets scanned — no surprise cropping */}
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className="block w-full object-contain"
-              style={{ maxHeight: '55vh' }}
-            />
-
-            {cameraError && (
-              <div className="absolute inset-0 flex items-center justify-center bg-gray-900 p-6">
-                <div className="text-center space-y-3">
-                  <p className="text-4xl">📷</p>
-                  <p className="text-white text-base font-medium">{cameraError}</p>
-                </div>
-              </div>
-            )}
-
-            {/* Shutter */}
-            {cameraReady && !cameraError && (
-              <button
-                onClick={handleCameraScan}
-                aria-label="Scan"
-                className="absolute bottom-5 left-1/2 -translate-x-1/2 active:scale-90 transition-transform"
-                style={{ width: 76, height: 76 }}
-              >
-                <span className="absolute inset-0 rounded-full border-4 border-white opacity-80" />
-                <span className="absolute inset-2 rounded-full bg-white" />
-              </button>
-            )}
-          </div>
-        </div>
+      {/* ── SINGLE BRICK live scanner ── */}
+      {inputMode === 'single' && (
+        <SingleScanner checklist={checklist} setNum={setNum} />
       )}
 
       {/* ── PHOTO PICKER (photo mode, nothing captured yet) ── */}
@@ -340,7 +267,7 @@ export default function ScanPage() {
 
           {scanState === 'result' && (
             <button onClick={scanAgain} className="btn-primary w-full py-4 text-base">
-              {inputMode === 'camera' ? '📹 Scan More Bricks' : '📷 Scan Another Photo'}
+              📷 Scan Another Photo
             </button>
           )}
         </div>
@@ -440,8 +367,8 @@ export default function ScanPage() {
         </div>
       )}
 
-      {/* Legend — idle states */}
-      {scanState === 'idle' && (
+      {/* Legend — photo mode idle */}
+      {inputMode === 'photo' && scanState === 'idle' && (
         <div className="card py-3">
           <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-2 text-center">
             What the colours mean
@@ -457,6 +384,238 @@ export default function ScanPage() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Single Brick live scanner ────────────────────────────────────────────────
+//
+// Barcode-gun workflow: hold ONE brick in the reticle → identified in ~1s.
+// Brickognize does the part number (no Claude → fast); colour comes from
+// the pixels, matched against the checklist's exact RGB values (95% accurate
+// in validation). Motion-gated: scans when the scene changes then stabilises.
+
+const SCAN_TICK_MS   = 650
+const COOLDOWN_MS    = 2200
+const STABLE_DIFF    = 8     // ≤ this vs previous frame = hand is steady
+const NEW_SCENE_DIFF = 13    // > this vs last scanned frame = new brick
+const MIN_FG         = 0.05  // minimum foreground fraction to bother scanning
+
+interface SingleShown {
+  res: SingleResult
+  displayName: string
+  colourName: string | null
+  ticked: boolean
+  lineId?: string
+}
+
+function SingleScanner({ checklist, setNum }: { checklist: ChecklistLine[]; setNum: string }) {
+  const videoRef     = useRef<HTMLVideoElement>(null)
+  const streamRef    = useRef<MediaStream | null>(null)
+  const busyRef      = useRef(false)
+  const prevSigRef   = useRef<Uint8Array | null>(null)
+  const lastScanRef  = useRef<Uint8Array | null>(null)
+  const cooldownRef  = useRef(0)
+  const checklistRef = useRef(checklist)
+  checklistRef.current = checklist
+
+  const [cameraError, setCameraError] = useState('')
+  const [identifying, setIdentifying] = useState(false)
+  const [shown, setShown]             = useState<SingleShown | null>(null)
+  const [session, setSession]         = useState({ needed: 0, enough: 0, wrong: 0, other: 0 })
+
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setInterval> | null = null
+
+    async function start() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
+          audio: false,
+        })
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return }
+        streamRef.current = stream
+        if (videoRef.current) videoRef.current.srcObject = stream
+        timer = setInterval(tick, SCAN_TICK_MS)
+      } catch {
+        if (!cancelled) setCameraError("Can't access camera — please allow camera permission and reload.")
+      }
+    }
+
+    function centerCrop(): HTMLCanvasElement | null {
+      const v = videoRef.current
+      if (!v || !v.videoWidth) return null
+      const side = 0.6 * Math.min(v.videoWidth, v.videoHeight)
+      const sx = (v.videoWidth - side) / 2, sy = (v.videoHeight - side) / 2
+      const c = document.createElement('canvas')
+      const out = Math.min(320, side)
+      c.width = out; c.height = out
+      c.getContext('2d')!.drawImage(v, sx, sy, side, side, 0, 0, out, out)
+      return c
+    }
+
+    async function tick() {
+      if (busyRef.current) return
+      const crop = centerCrop()
+      if (!crop) return
+
+      const sig    = frameSignature(crop)
+      const stable = signatureDiff(sig, prevSigRef.current) <= STABLE_DIFF
+      prevSigRef.current = sig
+      if (!stable) return
+      if (Date.now() < cooldownRef.current) return
+      if (foregroundFraction(crop) < MIN_FG) return
+      if (signatureDiff(sig, lastScanRef.current) <= NEW_SCENE_DIFF) return
+
+      busyRef.current = true
+      setIdentifying(true)
+      lastScanRef.current = sig
+
+      try {
+        const b64  = crop.toDataURL('image/jpeg', 0.85).split(',')[1]
+        const resp = await fetch('/api/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ crop: b64 }),
+        })
+        if (!resp.ok) throw new Error(`Server error ${resp.status}`)
+        const data = await resp.json()
+        const candidates = (data.candidates ?? []) as BKCandidate[]
+        const rgb = dominantColour(crop)
+        const res = matchSingle(candidates, rgb, checklistRef.current)
+
+        let ticked = false
+        if (res.status === 'needed' && res.line) {
+          ticked = true
+          await updateDoc(doc(db, 'sets', setNum, 'checklist', res.line.lineId), {
+            quantityFound: increment(1),
+          })
+        }
+
+        const displayName = res.line?.partName
+          || (res.partNum ? `Part ${res.partNum}` : 'Not recognised')
+        setShown({
+          res, displayName, ticked,
+          colourName: res.line?.colorName ?? null,
+          lineId: res.line?.lineId,
+        })
+        setSession(s => ({
+          needed: s.needed + (res.status === 'needed' ? 1 : 0),
+          enough: s.enough + (res.status === 'have_enough' ? 1 : 0),
+          wrong:  s.wrong  + (res.status === 'wrong_color' ? 1 : 0),
+          other:  s.other  + (['not_in_set', 'unknown'].includes(res.status) ? 1 : 0),
+        }))
+        cooldownRef.current = Date.now() + COOLDOWN_MS
+      } catch {
+        // transient network issue — just keep watching
+      } finally {
+        busyRef.current = false
+        setIdentifying(false)
+      }
+    }
+
+    start()
+    return () => {
+      cancelled = true
+      if (timer) clearInterval(timer)
+      streamRef.current?.getTracks().forEach(t => t.stop())
+    }
+  }, [setNum])
+
+  async function undoTick() {
+    if (!shown?.ticked || !shown.lineId) return
+    const line = checklistRef.current.find(l => l.lineId === shown.lineId)
+    await updateDoc(doc(db, 'sets', setNum, 'checklist', shown.lineId), {
+      quantityFound: Math.max(0, (line?.quantityFound ?? 1) - 1),
+    })
+    setShown({ ...shown, ticked: false })
+    setSession(s => ({ ...s, needed: Math.max(0, s.needed - 1) }))
+  }
+
+  const cfg = shown ? STATUS_CONFIG[shown.res.status] : null
+
+  return (
+    <div className="space-y-3">
+      {/* Camera + reticle */}
+      <div className="relative rounded-2xl overflow-hidden bg-black mx-auto flex justify-center">
+        <video ref={videoRef} autoPlay playsInline muted
+               className="block w-full object-contain" style={{ maxHeight: '48vh' }} />
+
+        {cameraError ? (
+          <div className="absolute inset-0 flex items-center justify-center bg-gray-900 p-6">
+            <div className="text-center space-y-3">
+              <p className="text-4xl">📷</p>
+              <p className="text-white text-base font-medium">{cameraError}</p>
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* Reticle — mirrors the exact region that gets scanned */}
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+              <div className={`rounded-2xl border-4 border-dashed transition-colors
+                               ${identifying ? 'border-lego-yellow' : 'border-white/70'}`}
+                   style={{ width: '52%', aspectRatio: '1/1', maxHeight: '80%' }} />
+            </div>
+            <div className="absolute bottom-3 left-0 right-0 flex justify-center pointer-events-none">
+              <span className="bg-black/60 text-white text-sm font-semibold px-4 py-1.5 rounded-full
+                               flex items-center gap-2">
+                {identifying && (
+                  <span className="inline-block w-3.5 h-3.5 border-2 border-lego-yellow
+                                   border-t-transparent rounded-full animate-spin" />
+                )}
+                {identifying ? 'Identifying…' : 'Hold one brick in the frame'}
+              </span>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Latest result */}
+      {shown && cfg && (
+        <div className={`card ${cfg.card} py-4`}>
+          <div className="flex items-center gap-3">
+            <span className="w-4 h-4 rounded-full flex-shrink-0"
+                  style={{ backgroundColor: cfg.box }} />
+            <div className="flex-1 min-w-0">
+              <p className="font-bold text-base leading-tight">
+                {cfg.label}{shown.ticked ? ' — added ✓' : ''}
+              </p>
+              <p className="text-sm text-brand-900/60 mt-0.5 truncate">
+                {shown.displayName}
+                {shown.colourName ? ` · ${shown.colourName}` : ''}
+                {shown.res.partNum ? ` · ${shown.res.partNum}` : ''}
+              </p>
+              {shown.res.line && (
+                <p className="text-xs text-brand-900/40 mt-0.5">
+                  {Math.min(shown.res.line.quantityFound + (shown.ticked ? 1 : 0),
+                            shown.res.line.quantityNeeded)}/{shown.res.line.quantityNeeded} found
+                </p>
+              )}
+            </div>
+            {shown.ticked && (
+              <button onClick={undoTick}
+                      className="text-xs font-bold text-red-500 border-2 border-red-200
+                                 rounded-full px-3 py-1.5 active:scale-95 transition-transform">
+                Undo
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Session tally */}
+      <div className="grid grid-cols-4 gap-1.5">
+        <StatCard count={session.needed} label="Needed"    dotClass="bg-green-500"  />
+        <StatCard count={session.enough} label="Enough"    dotClass="bg-yellow-400" />
+        <StatCard count={session.wrong}  label="Colour"    dotClass="bg-orange-400" />
+        <StatCard count={session.other}  label="Other"     dotClass="bg-gray-300"   />
+      </div>
+
+      <p className="text-xs text-brand-900/40 text-center px-4">
+        Hold each brick steady inside the frame — it identifies automatically,
+        ticks off needed parts, then waits for the next brick.
+      </p>
     </div>
   )
 }

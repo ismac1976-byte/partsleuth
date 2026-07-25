@@ -288,6 +288,17 @@ class handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get('content-length', 0))
             body   = json.loads(self.rfile.read(length))
+            # Single-brick live mode: Brickognize only, no Claude → ~0.5s.
+            # Colour is resolved on-device from pixels vs checklist RGB.
+            single = body.get('crop')
+            if isinstance(single, str) and single:
+                items = _brickognize(single)
+                self._json(200, {'candidates': [
+                    {'part_num': pid, 'score': round(score, 3)}
+                    for pid, score in items[:6]
+                ]})
+                return
+
             crops  = body.get('crops')
             if isinstance(crops, list) and crops:
                 catalog = body.get('catalog')
