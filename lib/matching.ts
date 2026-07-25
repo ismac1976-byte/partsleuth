@@ -74,11 +74,11 @@ const NEAR_COLOURS: Record<string, string[]> = {
   'medium azure':      ['light aqua', 'dark azure', 'blue'],
   'dark azure':        ['medium azure', 'blue'],
   'light aqua':        ['medium azure', 'white'],
-  'reddish brown':     ['medium nougat', 'dark brown', 'dark orange'],
+  'reddish brown':     ['medium nougat', 'dark brown', 'dark orange', 'dark tan'],
   'medium nougat':     ['reddish brown', 'tan', 'dark tan'],
   'dark brown':        ['reddish brown', 'black'],
   'tan':               ['dark tan', 'medium nougat', 'pearl gold'],
-  'dark tan':          ['tan', 'medium nougat'],
+  'dark tan':          ['tan', 'medium nougat', 'reddish brown'],
   'pearl gold':        ['tan', 'dark tan', 'flat silver'],
   'flat silver':       ['light bluish gray', 'pearl gold'],
   'orange':            ['dark orange', 'bright light orange'],
@@ -168,13 +168,15 @@ export function matchDetections(
       let rows = lookup.byPartColor.get(`${pn}|${ck}`)
               ?? lookup.byPartColor.get(`${stripVariant(pn)}|${ck}`)
               ?? []
-      // Near-colour rescue: exact part number matching lines in exactly ONE
-      // colour, and the seen colour is a known confusion pair of it → match.
+      // Near-colour rescue: the part number is exact (Brickognize-backed).
+      // If exactly ONE of the colours this set stocks that part in is a
+      // known confusion-pair of the colour we saw → match that line.
       if (!rows.length) {
         const partRows = lookup.byPart.get(pn) ?? lookup.byPart.get(stripVariant(pn)) ?? []
         const colours = Array.from(new Set(partRows.map(r => normColor(r.colorName))))
-        if (colours.length === 1 && coloursNear(ck, colours[0])) {
-          rows = partRows
+        const nearCols = colours.filter(c => coloursNear(ck, c))
+        if (nearCols.length === 1) {
+          rows = partRows.filter(r => normColor(r.colorName) === nearCols[0])
         }
       }
       if (rows.length) {
