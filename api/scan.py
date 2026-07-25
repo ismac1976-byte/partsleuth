@@ -12,7 +12,11 @@ v3 → v4 architecture change (why this is dramatically faster):
   - Result: opencv-python + numpy + Pillow (~90 MB) removed from the
     function bundle → cold starts drop from many seconds to well under one.
 
-POST  { image_b64 }              (JPEG, already ≤800px, base64)
+POST  { crops: [b64, ...] }      (preferred: one close-up crop per piece,
+                                  detected on-device — exact boxes stay client-side)
+→     { pieces: [ { i, part_num, color, confidence } ] }        (i is 1-based)
+
+POST  { image_b64 }              (fallback: whole image, Claude estimates boxes)
 →     { pieces: [ { part_num, color, confidence, bbox_pct } ] }
 """
 
@@ -23,27 +27,46 @@ import httpx
 
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 
-# ~130 input tokens. Compact single-char keys cut output tokens ~60%.
-_PROMPT = (
-    'LEGO expert. List every piece visible — include unidentifiable ones.\n'
-    'Each entry: {"p":"part#","c":"color","b":[x1,y1,x2,y2],"cf":"X"}\n'
+_PART_VOCAB = (
     'p = BrickLink# (e.g. "3001"=Brick2x4 "3010"=Brick1x4 "3004"=Brick1x2 '
     '"3003"=Brick2x2 "3005"=Brick1x1 "3020"=Plate2x4 "3023"=Plate1x2 '
-    '"3022"=Plate2x2 "3024"=Plate1x1 "3068b"=Tile2x2 "3069b"=Tile1x2) or null\n'
-    'c = LEGO colour (Red Blue Yellow Black White "Light Bluish Gray" '
-    '"Dark Bluish Gray" Tan Green "Dark Green" Orange "Medium Azure" '
-    '"Reddish Brown" Lime "Trans-Clear") or null\n'
-    'b = [x1,y1,x2,y2] 0-1 image fractions, TIGHT around the piece\n'
+    '"3022"=Plate2x2 "3024"=Plate1x1 "3068b"=Tile2x2 "3069b"=Tile1x2 '
+    '"3040b"=Slope45-2x1 "11477"=SlopeCurved2x1 "3062b"=RoundBrick1x1 '
+    '"6141"=RoundPlate1x1 "98138"=RoundTile1x1) or null\n'
+    'c = LEGO colour (Red "Dark Red" Blue "Dark Blue" Yellow Black White '
+    '"Light Bluish Gray" "Dark Bluish Gray" Tan "Dark Tan" Green "Dark Green" '
+    'Orange "Dark Orange" "Bright Light Orange" "Medium Azure" "Reddish Brown" '
+    '"Dark Brown" Lime "Dark Purple" "Pearl Gold" "Medium Nougat" '
+    '"Trans-Clear" "Trans-Light Blue") or null\n'
     'cf = h(high) m(medium) l(low) n(unidentifiable)\n'
+)
+
+# Whole-image fallback prompt (Claude estimates boxes — approximate)
+_PROMPT_FULL = (
+    'LEGO expert. List every piece visible — include unidentifiable ones.\n'
+    'Each entry: {"p":"part#","c":"color","b":[x1,y1,x2,y2],"cf":"X"}\n'
+    + _PART_VOCAB +
+    'b = [x1,y1,x2,y2] 0-1 image fractions, TIGHT around the piece\n'
     'Rules: separate touching pieces; no duplicates.\n'
     'Return ONLY valid JSON:\n'
     '{"pieces":[{"p":"3001","c":"Red","b":[0.1,0.2,0.3,0.4],"cf":"h"}]}'
 )
 
+# Per-crop prompt (preferred: identification only, no localisation)
+_PROMPT_CROPS = (
+    'LEGO expert. Each numbered image is a close-up of ONE LEGO piece on '
+    'white paper. Identify the piece in every image.\n'
+    'Each entry: {"i":<image number>,"p":"part#","c":"color","cf":"X"}\n'
+    + _PART_VOCAB +
+    'Include EVERY image number exactly once, in order.\n'
+    'Return ONLY valid JSON:\n'
+    '{"pieces":[{"i":1,"p":"3001","c":"Red","cf":"h"}]}'
+)
+
 _CF_EXPAND = {'h': 'high', 'm': 'medium', 'l': 'low', 'n': 'none'}
 
 
-def identify_pieces(image_b64: str) -> list[dict]:
+def _call_claude(content: list, max_tokens: int) -> list[dict]:
     if not ANTHROPIC_KEY:
         raise RuntimeError('ANTHROPIC_API_KEY is not set in environment')
 
@@ -56,17 +79,8 @@ def identify_pieces(image_b64: str) -> list[dict]:
         },
         json={
             'model': 'claude-haiku-4-5-20251001',
-            'max_tokens': 1000,
-            'messages': [{
-                'role': 'user',
-                'content': [
-                    {'type': 'image',
-                     'source': {'type': 'base64',
-                                'media_type': 'image/jpeg',
-                                'data': image_b64}},
-                    {'type': 'text', 'text': _PROMPT},
-                ],
-            }],
+            'max_tokens': max_tokens,
+            'messages': [{'role': 'user', 'content': content}],
         },
         timeout=50.0,
     )
@@ -77,9 +91,45 @@ def identify_pieces(image_b64: str) -> list[dict]:
     text = resp.json()['content'][0]['text'].strip()
     text = re.sub(r'^```[a-z]*\s*', '', text, flags=re.MULTILINE)
     text = re.sub(r'\s*```$',       '', text, flags=re.MULTILINE)
+    return json.loads(text).get('pieces', [])
 
-    raw = json.loads(text).get('pieces', [])
 
+def _img(b64: str) -> dict:
+    return {'type': 'image',
+            'source': {'type': 'base64', 'media_type': 'image/jpeg', 'data': b64}}
+
+
+def identify_crops(crops: list[str]) -> list[dict]:
+    """Preferred path: one close-up crop per piece. No localisation asked."""
+    content: list = []
+    for idx, crop in enumerate(crops, start=1):
+        content.append({'type': 'text', 'text': f'Image {idx}:'})
+        content.append(_img(crop))
+    content.append({'type': 'text', 'text': _PROMPT_CROPS})
+
+    raw = _call_claude(content, max_tokens=60 + 25 * len(crops))
+
+    pieces = []
+    for rp in raw:
+        try:
+            i = int(rp.get('i', 0))
+        except (TypeError, ValueError):
+            continue
+        if not (1 <= i <= len(crops)):
+            continue
+        pieces.append({
+            'i':          i,
+            'part_num':   rp.get('p'),
+            'color':      rp.get('c'),
+            'confidence': _CF_EXPAND.get(rp.get('cf', 'n'), 'none'),
+        })
+    return pieces
+
+
+def identify_full(image_b64: str) -> list[dict]:
+    """Fallback path: whole image, Claude estimates boxes (approximate)."""
+    raw = _call_claude([_img(image_b64), {'type': 'text', 'text': _PROMPT_FULL}],
+                       max_tokens=1000)
     pieces = []
     for rp in raw:
         bbox = rp.get('b', [])
@@ -101,11 +151,15 @@ class handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get('content-length', 0))
             body   = json.loads(self.rfile.read(length))
+            crops  = body.get('crops')
+            if isinstance(crops, list) and crops:
+                self._json(200, {'pieces': identify_crops(crops[:40])})
+                return
             image_b64 = body.get('image_b64')
             if not image_b64:
-                self._json(400, {'error': 'image_b64 is required'})
+                self._json(400, {'error': 'crops or image_b64 is required'})
                 return
-            self._json(200, {'pieces': identify_pieces(image_b64)})
+            self._json(200, {'pieces': identify_full(image_b64)})
         except Exception as e:
             self._json(500, {'error': str(e)})
 

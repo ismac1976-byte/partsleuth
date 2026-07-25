@@ -112,6 +112,14 @@ export default function SetDetailPage() {
     } finally { setTicking(null) }
   }
 
+  async function untickOne(line: ChecklistLine) {
+    if (ticking || line.quantityFound <= 0) return
+    setTicking(line.lineId)
+    try {
+      await updateDoc(doc(db, 'sets', setNum, 'checklist', line.lineId), { quantityFound: increment(-1) })
+    } finally { setTicking(null) }
+  }
+
   // Derived stats
   const nonSpares  = checklist.filter(l => !l.isSpare)
   const typesFound = nonSpares.filter(l => l.quantityFound >= l.quantityNeeded).length
@@ -120,9 +128,8 @@ export default function SetDetailPage() {
     .filter(l => l.quantityFound < l.quantityNeeded)
     .sort((a, b) => b.quantityNeeded - a.quantityNeeded)
 
-  // LEGO official instructions URL — strip the "-1" variant suffix
-  const baseSetNum      = setNum.split('-')[0]
-  const instructionsUrl = `https://www.lego.com/en-us/service/buildinginstructions/${baseSetNum}`
+  // Official LEGO instructions — our API finds the PDF and redirects straight to it
+  const instructionsUrl = `/api/instructions?set=${setNum.split('-')[0]}`
 
   if (isSetLoading) {
     return (
@@ -184,25 +191,19 @@ export default function SetDetailPage() {
       {checklist.length > 0 ? (
         <div className="space-y-3">
           <div className="flex gap-3">
-            <Link href={`/sets/${setNum}/scan?mode=camera`}
-                  className="btn-primary flex-1 text-center text-base py-3.5">
-              📹 Scan Bricks
-            </Link>
             <Link href={`/sets/${setNum}/scan?mode=photo`}
-                  className="btn-primary flex-1 text-center text-base py-3.5">
+                  className="btn-primary flex-[2] text-center text-base py-3.5">
               📷 Photo Bricks
             </Link>
-          </div>
-          <div className="flex gap-3">
             <Link href={`/sets/${setNum}/missing`}
-                  className="btn-secondary flex-1 text-center text-base py-3">
+                  className="btn-secondary flex-1 text-center text-base py-3.5">
               📋 Missing
             </Link>
-            <a href={instructionsUrl} target="_blank" rel="noopener noreferrer"
-               className="btn-secondary flex-1 text-center text-base py-3">
-              📖 Instructions
-            </a>
           </div>
+          <a href={instructionsUrl} target="_blank" rel="noopener noreferrer"
+             className="btn-secondary w-full text-center text-base py-3 block">
+            📖 Building Instructions (PDF)
+          </a>
         </div>
       ) : (
         <div className="space-y-3">
@@ -279,6 +280,15 @@ export default function SetDetailPage() {
                                    border-t-transparent rounded-full animate-spin flex-shrink-0" />
                 ) : (
                   <div className="flex items-center gap-1.5 flex-shrink-0">
+                    {line.quantityFound > 0 && (
+                      <button
+                        onClick={() => untickOne(line)}
+                        className="w-8 h-8 rounded-full bg-red-500 flex items-center justify-center
+                                   text-white text-sm font-bold hover:bg-red-600 active:scale-90
+                                   transition-all shadow-sm"
+                        title="Remove one — I was wrong"
+                      >✕</button>
+                    )}
                     <button
                       onClick={() => tickOne(line.lineId)}
                       className="w-8 h-8 rounded-full border-2 border-gray-200

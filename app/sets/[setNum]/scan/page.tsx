@@ -17,13 +17,11 @@ import { db } from '@/lib/firebase'
 import { useParams, useSearchParams } from 'next/navigation'
 import type { ChecklistLine, ScanResult, Detection, DetectionStatus } from '@/lib/types'
 import { matchDetections, summarize, type RawPiece } from '@/lib/matching'
+import { segmentBricks, type SegmentResult } from '@/lib/segment'
 import Link from 'next/link'
 
 type ScanState = 'idle' | 'processing' | 'result' | 'error'
 type InputMode = 'camera' | 'photo'
-
-const MAX_DIM = 800          // must match what api/scan.py expects
-const JPEG_Q  = 0.78
 
 // ── Status display config ────────────────────────────────────────────────────
 
@@ -41,27 +39,16 @@ const CONFIDENCE_BADGE: Record<string, string> = {
   high: '', medium: '~', low: '?', none: '??',
 }
 
-// ── Client-side image downscaling ────────────────────────────────────────────
+// ── Client-side detection + downscaling (lib/segment.ts) ────────────────────
 
 interface Captured { dataUrl: string; b64: string }
 
-function canvasToCaptured(source: HTMLVideoElement | HTMLImageElement,
-                          sw: number, sh: number): Captured {
-  const scale = Math.min(1, MAX_DIM / Math.max(sw, sh))
-  const c = document.createElement('canvas')
-  c.width  = Math.round(sw * scale)
-  c.height = Math.round(sh * scale)
-  c.getContext('2d')!.drawImage(source, 0, 0, c.width, c.height)
-  const dataUrl = c.toDataURL('image/jpeg', JPEG_Q)
-  return { dataUrl, b64: dataUrl.split(',')[1] }
-}
-
-function downscaleFile(file: File): Promise<Captured> {
+function segmentFile(file: File): Promise<SegmentResult> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file)
     const img = new Image()
     img.onload = () => {
-      try { resolve(canvasToCaptured(img, img.naturalWidth, img.naturalHeight)) }
+      try { resolve(segmentBricks(img, img.naturalWidth, img.naturalHeight)) }
       catch (e) { reject(e) }
       finally { URL.revokeObjectURL(url) }
     }
@@ -140,17 +127,20 @@ export default function ScanPage() {
 
   // ── Scan logic ──
 
-  const runScan = useCallback(async (cap: Captured) => {
-    setCaptured(cap)
+  const runScan = useCallback(async (seg: SegmentResult) => {
+    setCaptured(seg.display)
     setScanState('processing')
     setResult(null)
     setErrorMsg('')
 
     try {
+      const usingCrops = seg.pieces.length > 0
       const resp = await fetch('/api/scan', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ image_b64: cap.b64 }),
+        body: JSON.stringify(usingCrops
+          ? { crops: seg.pieces.map(p => p.cropB64) }   // exact boxes stay on-device
+          : { image_b64: seg.display.b64 }),             // fallback: whole image
       })
 
       if (!resp.ok) {
@@ -159,7 +149,27 @@ export default function ScanPage() {
       }
 
       const data = await resp.json()
-      const detections = matchDetections((data.pieces ?? []) as RawPiece[], checklist)
+      let pieces: RawPiece[]
+
+      if (usingCrops) {
+        // Attach our CV boxes to Claude's per-crop identifications.
+        // Crops Claude skipped still get a box, shown as unknown.
+        const byIndex = new Map<number, any>()
+        for (const p of (data.pieces ?? [])) byIndex.set(p.i, p)
+        pieces = seg.pieces.map((sp, idx) => {
+          const p = byIndex.get(idx + 1)
+          return {
+            part_num:   p?.part_num ?? null,
+            color:      p?.color ?? null,
+            confidence: p?.confidence ?? 'none',
+            bbox_pct:   sp.bboxPct,
+          }
+        })
+      } else {
+        pieces = (data.pieces ?? []) as RawPiece[]
+      }
+
+      const detections = matchDetections(pieces, checklist)
       const scanResult: ScanResult = { detections, summary: summarize(detections) }
 
       setResult(scanResult)
@@ -175,15 +185,15 @@ export default function ScanPage() {
   function handleCameraScan() {
     const v = videoRef.current
     if (!v || !cameraReady) return
-    runScan(canvasToCaptured(v, v.videoWidth, v.videoHeight))
+    runScan(segmentBricks(v, v.videoWidth, v.videoHeight))
   }
 
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
     try {
-      const cap = await downscaleFile(file)
-      runScan(cap)               // auto-scan immediately
+      const seg = await segmentFile(file)
+      runScan(seg)               // auto-scan immediately
     } catch (err: any) {
       setErrorMsg(err.message ?? 'Could not read that photo')
       setScanState('error')

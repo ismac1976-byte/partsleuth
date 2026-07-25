@@ -49,6 +49,19 @@ export default function MissingPage() {
     }
   }
 
+  // Remove 1 from quantityFound (undo a mistaken tick)
+  async function removeOne(line: ChecklistLine) {
+    if (ticking || line.quantityFound <= 0) return
+    setTicking(line.lineId)
+    try {
+      await updateDoc(doc(db, 'sets', setNum, 'checklist', line.lineId), {
+        quantityFound: increment(-1),
+      })
+    } finally {
+      setTicking(null)
+    }
+  }
+
   // Mark all remaining as found
   async function markAllFound(line: ChecklistLine) {
     if (ticking) return
@@ -185,6 +198,19 @@ export default function MissingPage() {
                                      border-t-transparent rounded-full animate-spin flex-shrink-0" />
                   ) : (
                     <div className="flex items-center gap-2 flex-shrink-0">
+                      {/* −1 button — undo a mistaken tick */}
+                      {line.quantityFound > 0 && (
+                        <button
+                          onClick={() => removeOne(line)}
+                          className="w-9 h-9 rounded-full bg-red-500
+                                     flex items-center justify-center
+                                     text-white text-base font-bold
+                                     hover:bg-red-600 active:scale-90 transition-all shadow-sm"
+                          title="Remove one — I was wrong"
+                        >
+                          ✕
+                        </button>
+                      )}
                       {/* +1 button — add one at a time */}
                       <button
                         onClick={() => addOne(line.lineId)}
