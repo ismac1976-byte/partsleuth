@@ -1,6 +1,6 @@
 {
   "functions": {
-    "api/scan.py":        { "maxDuration": 30 },
+    "api/scan.py":        { "maxDuration": 60 },
     "api/rebrickable.py": { "maxDuration": 10 },
     "api/find-set.py":    { "maxDuration": 25 }
   }
