@@ -300,7 +300,9 @@ export function matchSingle(
 
   // Very far from every colour the set stocks this part in → wrong colour
   // (e.g. a blue 3001 when the set only has it in red).
-  if (dist >= 0 && dist > 95) {
+  // Threshold 115: benchmarked — white pieces under shading measure d97-105
+  // while genuine cross-colour mismatches sit at d17-45 or d140+.
+  if (dist >= 0 && dist > 115) {
     return { status: 'wrong_color', line, partNum: chosen.part_num, colourDist: dist, score: chosen.score }
   }
 
