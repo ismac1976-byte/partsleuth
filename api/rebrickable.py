@@ -120,6 +120,10 @@ class handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if code == 200:
+            # Set metadata and inventories are effectively immutable —
+            # let Vercel's edge cache serve repeats (faster + fewer API calls)
+            self.send_header("Cache-Control", "public, s-maxage=86400, max-age=3600")
         self.end_headers()
         self.wfile.write(body)
 

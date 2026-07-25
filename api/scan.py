@@ -199,68 +199,75 @@ def identify_crops(crops: list[str], catalog: list[str] | None = None) -> list[d
     """
     # Kick off all Brickognize lookups in the background first
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=12)
-    bk_futures = [pool.submit(_brickognize, c) for c in crops]
+    try:
+        bk_futures = [pool.submit(_brickognize, c) for c in crops]
 
-    content: list = [{'type': 'text', 'text': _prompt_crops(catalog)}]
-    for idx, crop in enumerate(crops, start=1):
-        content.append({'type': 'text', 'text': f'Image {idx}:'})
-        content.append(_img(crop))
-    content.append({'type': 'text', 'text':
-        f'That was all {len(crops)} images. Return the JSON now — one entry '
-        f'per image, i from 1 to {len(crops)}. Remember the procedure: colour '
-        f'seen → shortlist that colour → closest shape from the shortlist. '
-        f'Prefer a same-colour candidate with an imperfect shape over a '
-        f'different-colour candidate with a perfect shape.'})
+        content: list = [{'type': 'text', 'text': _prompt_crops(catalog)}]
+        for idx, crop in enumerate(crops, start=1):
+            content.append({'type': 'text', 'text': f'Image {idx}:'})
+            content.append(_img(crop))
+        content.append({'type': 'text', 'text':
+            f'That was all {len(crops)} images. Return the JSON now — one entry '
+            f'per image, i from 1 to {len(crops)}. Remember the procedure: colour '
+            f'seen → shortlist that colour → closest shape from the shortlist. '
+            f'Prefer a same-colour candidate with an imperfect shape over a '
+            f'different-colour candidate with a perfect shape.'})
 
-    raw = _call_claude(content, max_tokens=60 + 30 * len(crops))
-
-    claude_by_i: dict[int, dict] = {}
-    for rp in raw:
+        # Claude provides colour + fallback IDs. If it fails (rate limit,
+        # timeout), DEGRADE rather than fail: Brickognize alone still gives
+        # part numbers, and the client can match single-colour parts.
         try:
-            i = int(rp.get('i', 0))
-        except (TypeError, ValueError):
-            continue
-        if 1 <= i <= len(crops):
-            claude_by_i[i] = rp
-
-    cat_ids = _catalog_part_ids(catalog)
-
-    pieces = []
-    for i in range(1, len(crops) + 1):
-        cl = claude_by_i.get(i, {})
-        part  = cl.get('p')
-        color = cl.get('c')
-        cf    = _CF_EXPAND.get(cl.get('cf', 'n'), 'none')
-        source = 'claude'
-
-        try:
-            bk = bk_futures[i - 1].result(timeout=20)
+            raw = _call_claude(content, max_tokens=60 + 30 * len(crops))
         except Exception:
-            bk = []
+            raw = []
 
-        if bk:
-            top = bk[0]
-            bk_cat = next((b for b in bk
-                           if b[0] in cat_ids or _strip_variant(b[0]) in cat_ids), None)
-            if top[1] >= 0.6:
-                # Strong visual match — trust it even if it's not in the set
-                # (keeps "not in set" honest)
-                part, cf, source = top[0], 'high', 'brickognize'
-            elif bk_cat and bk_cat[1] >= 0.2:
-                # Decent match that's also in the set's inventory
-                part, source = bk_cat[0], 'brickognize'
-                cf = 'high' if bk_cat[1] >= 0.4 else 'medium'
+        claude_by_i: dict[int, dict] = {}
+        for rp in raw:
+            try:
+                i = int(rp.get('i', 0))
+            except (TypeError, ValueError):
+                continue
+            if 1 <= i <= len(crops):
+                claude_by_i[i] = rp
 
-        pieces.append({
-            'i':          i,
-            'part_num':   part,
-            'color':      color,
-            'confidence': cf,
-            'source':     source,
-        })
+        cat_ids = _catalog_part_ids(catalog)
 
-    pool.shutdown(wait=False)
-    return pieces
+        pieces = []
+        for i in range(1, len(crops) + 1):
+            cl = claude_by_i.get(i, {})
+            part  = cl.get('p')
+            color = cl.get('c')
+            cf    = _CF_EXPAND.get(cl.get('cf', 'n'), 'none')
+            source = 'claude'
+
+            try:
+                bk = bk_futures[i - 1].result(timeout=20)
+            except Exception:
+                bk = []
+
+            if bk:
+                top = bk[0]
+                bk_cat = next((b for b in bk
+                               if b[0] in cat_ids or _strip_variant(b[0]) in cat_ids), None)
+                if top[1] >= 0.6:
+                    # Strong visual match — trust it even if it's not in the set
+                    # (keeps "not in set" honest)
+                    part, cf, source = top[0], 'high', 'brickognize'
+                elif bk_cat and bk_cat[1] >= 0.2:
+                    # Decent match that's also in the set's inventory
+                    part, source = bk_cat[0], 'brickognize'
+                    cf = 'high' if bk_cat[1] >= 0.4 else 'medium'
+
+            pieces.append({
+                'i':          i,
+                'part_num':   part,
+                'color':      color,
+                'confidence': cf,
+                'source':     source,
+            })
+        return pieces
+    finally:
+        pool.shutdown(wait=False)
 
 
 def identify_full(image_b64: str) -> list[dict]:

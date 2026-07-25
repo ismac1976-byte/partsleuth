@@ -171,12 +171,17 @@ export function matchDetections(
       // Near-colour rescue: the part number is exact (Brickognize-backed).
       // If exactly ONE of the colours this set stocks that part in is a
       // known confusion-pair of the colour we saw → match that line.
+      // No colour at all (degraded mode) + part stocked in one colour → match.
       if (!rows.length) {
         const partRows = lookup.byPart.get(pn) ?? lookup.byPart.get(stripVariant(pn)) ?? []
         const colours = Array.from(new Set(partRows.map(r => normColor(r.colorName))))
-        const nearCols = colours.filter(c => coloursNear(ck, c))
-        if (nearCols.length === 1) {
-          rows = partRows.filter(r => normColor(r.colorName) === nearCols[0])
+        if (!ck && colours.length === 1) {
+          rows = partRows
+        } else {
+          const nearCols = colours.filter(c => coloursNear(ck, c))
+          if (nearCols.length === 1) {
+            rows = partRows.filter(r => normColor(r.colorName) === nearCols[0])
+          }
         }
       }
       if (rows.length) {
