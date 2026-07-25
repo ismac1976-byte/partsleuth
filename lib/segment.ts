@@ -26,7 +26,7 @@ export interface SegmentResult {
 
 const DISPLAY_MAX = 800
 const MASK_W      = 400     // working resolution for segmentation
-const CROP_MAX    = 240     // max dimension of each identification crop
+const CROP_MAX    = 300     // max dimension of each identification crop
 const MAX_PIECES  = 30
 
 export function segmentBricks(
