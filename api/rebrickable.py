@@ -41,7 +41,10 @@ def format_part(item: dict) -> dict:
     color = item["color"]
     bl_ids = part.get("external_ids", {}).get("BrickLink", [])
     return {
-        "line_id": f"{part['part_num']}_{color['id']}",
+        # Spares get their own doc id — previously a spare line shared its id
+        # with the real entry and could overwrite the true quantity_needed.
+        "line_id": (f"{part['part_num']}_{color['id']}_s"
+                    if item.get("is_spare") else f"{part['part_num']}_{color['id']}"),
         "part_num": part["part_num"],
         "part_name": part["name"],
         "part_img_url": part.get("part_img_url", ""),
