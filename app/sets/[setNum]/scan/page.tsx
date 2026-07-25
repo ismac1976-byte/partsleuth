@@ -62,8 +62,8 @@ const CONFIDENCE_BADGE: Record<string, string> = {
 
 export default function ScanPage() {
   const { setNum } = useParams<{ setNum: string }>()
-  const videoRef   = useRef<HTMLVIdeUlElement>(null)
-  const canvasRef  = useRef<HTMLCA�GElement>(null)
+  const videoRef   = useRef<HTMLVideoElement>(null)
+  const canvasRef  = useRef<HTMLCanvasElement>(null)
   const fileRef    = useRef<HTMLInputElement>(null)
   const streamRef  = useRef<MediaStream | null>(null)
 
