@@ -20,12 +20,48 @@ POST  { image_b64 }              (fallback: whole image, Claude estimates boxes)
 →     { pieces: [ { part_num, color, confidence, bbox_pct } ] }
 """
 
-import os, json, re
+import os, json, re, base64
+import concurrent.futures
 from http.server import BaseHTTPRequestHandler
 
 import httpx
 
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+
+# ── Brickognize: specialised brick recogniser for exact part numbers ─────────
+# Free public API, ~0.2-1s per image. Runs in PARALLEL with the Claude call,
+# so it adds no latency. Claude still provides colour (Brickognize doesn't)
+# and remains the fallback when Brickognize is unsure.
+
+def _brickognize(crop_b64: str) -> list[tuple[str, float]]:
+    """Returns ranked [(part_id, score), ...] — empty list on any failure."""
+    try:
+        r = httpx.post(
+            'https://api.brickognize.com/predict/',
+            files={'query_image': ('crop.jpg', base64.b64decode(crop_b64), 'image/jpeg')},
+            timeout=15.0,
+        )
+        if r.status_code != 200:
+            return []
+        return [(str(it.get('id')), float(it.get('score', 0)))
+                for it in r.json().get('items', [])
+                if it.get('type') == 'part' and it.get('id')]
+    except Exception:
+        return []
+
+
+def _strip_variant(p: str) -> str:
+    return re.sub(r'[a-z]+[0-9]*$', '', p, flags=re.I)
+
+
+def _catalog_part_ids(catalog: list[str] | None) -> set[str]:
+    ids: set[str] = set()
+    for line in catalog or []:
+        pid = line.split('|')[0].strip()
+        if pid:
+            ids.add(pid)
+            ids.add(_strip_variant(pid))
+    return ids
 
 _PART_VOCAB = (
     'p = BrickLink# (e.g. "3001"=Brick2x4 "3010"=Brick1x4 "3004"=Brick1x2 '
@@ -153,9 +189,18 @@ def _img(b64: str) -> dict:
 def identify_crops(crops: list[str], catalog: list[str] | None = None) -> list[dict]:
     """Preferred path: one close-up crop per piece. No localisation asked.
 
+    Two recognisers run IN PARALLEL:
+      - Brickognize (specialised) → exact part numbers
+      - Claude Vision            → colour + fallback part numbers
+    Total latency = the slower of the two ≈ the Claude call alone.
+
     The instruction prompt goes BEFORE the image stream: with many images,
     a trailing prompt causes image-index drift (answers shifted by one).
     """
+    # Kick off all Brickognize lookups in the background first
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=12)
+    bk_futures = [pool.submit(_brickognize, c) for c in crops]
+
     content: list = [{'type': 'text', 'text': _prompt_crops(catalog)}]
     for idx, crop in enumerate(crops, start=1):
         content.append({'type': 'text', 'text': f'Image {idx}:'})
@@ -169,20 +214,52 @@ def identify_crops(crops: list[str], catalog: list[str] | None = None) -> list[d
 
     raw = _call_claude(content, max_tokens=60 + 30 * len(crops))
 
-    pieces = []
+    claude_by_i: dict[int, dict] = {}
     for rp in raw:
         try:
             i = int(rp.get('i', 0))
         except (TypeError, ValueError):
             continue
-        if not (1 <= i <= len(crops)):
-            continue
+        if 1 <= i <= len(crops):
+            claude_by_i[i] = rp
+
+    cat_ids = _catalog_part_ids(catalog)
+
+    pieces = []
+    for i in range(1, len(crops) + 1):
+        cl = claude_by_i.get(i, {})
+        part  = cl.get('p')
+        color = cl.get('c')
+        cf    = _CF_EXPAND.get(cl.get('cf', 'n'), 'none')
+        source = 'claude'
+
+        try:
+            bk = bk_futures[i - 1].result(timeout=20)
+        except Exception:
+            bk = []
+
+        if bk:
+            top = bk[0]
+            bk_cat = next((b for b in bk
+                           if b[0] in cat_ids or _strip_variant(b[0]) in cat_ids), None)
+            if top[1] >= 0.6:
+                # Strong visual match — trust it even if it's not in the set
+                # (keeps "not in set" honest)
+                part, cf, source = top[0], 'high', 'brickognize'
+            elif bk_cat and bk_cat[1] >= 0.2:
+                # Decent match that's also in the set's inventory
+                part, source = bk_cat[0], 'brickognize'
+                cf = 'high' if bk_cat[1] >= 0.4 else 'medium'
+
         pieces.append({
             'i':          i,
-            'part_num':   rp.get('p'),
-            'color':      rp.get('c'),
-            'confidence': _CF_EXPAND.get(rp.get('cf', 'n'), 'none'),
+            'part_num':   part,
+            'color':      color,
+            'confidence': cf,
+            'source':     source,
         })
+
+    pool.shutdown(wait=False)
     return pieces
 
 
