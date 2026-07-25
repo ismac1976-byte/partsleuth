@@ -64,10 +64,13 @@ def _prompt_crops(catalog: list[str] | None) -> str:
             'on white paper.\n'
             'CANDIDATES — the parts expected in this set (part# | name | colour):\n'
             f'{cat}\n\n'
-            'For each image pick the best-matching candidate, copying its part# '
-            'and colour EXACTLY as written above. Study shape (studs, slopes, '
-            'brackets, curves) and colour carefully. Only if NO candidate fits, '
-            'give your own BrickLink part# and colour with cf "l".\n'
+            'For each image: FIRST decide the colour you actually see, THEN pick '
+            'the candidate whose colour AND shape both match, copying its part# '
+            'and colour EXACTLY as written above. Never pick a candidate whose '
+            'colour differs from what you see. Study shape carefully: studs, '
+            'slopes, brackets, curves, holes. If no candidate matches both '
+            'colour and shape, give your own BrickLink part# and colour, cf "l". '
+            'If the image is unclear or shows multiple pieces, use cf "n".\n'
             'Entry: {"i":<image number>,"p":"part#","c":"colour","cf":"X"}\n'
             'cf = h(high) m(medium) l(low) n(unidentifiable)\n'
             'Include EVERY image number exactly once, in order.\n'
@@ -101,6 +104,7 @@ def _call_claude(content: list, max_tokens: int) -> list[dict]:
         json={
             'model': 'claude-haiku-4-5-20251001',
             'max_tokens': max_tokens,
+            'temperature': 0,        # deterministic IDs — same photo, same answer
             'messages': [{'role': 'user', 'content': content}],
         },
         timeout=50.0,

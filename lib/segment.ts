@@ -156,8 +156,8 @@ export function segmentBricks(
 
   // 5. High-res crops from the original source
   const pieces: SegmentedPiece[] = kept.map(bx => {
-    const padX = 0.14 * (bx.x2 - bx.x1 + 1) + 2
-    const padY = 0.14 * (bx.y2 - bx.y1 + 1) + 2
+    const padX = 0.14 * (bx.x2 - bx.x1 + 1) + 4   // +4 compensates the 2-pass erosion
+    const padY = 0.14 * (bx.y2 - bx.y1 + 1) + 4
     const fx1 = Math.max(0, (bx.x1 - padX) / mw)
     const fy1 = Math.max(0, (bx.y1 - padY) / mh)
     const fx2 = Math.min(1, (bx.x2 + 1 + padX) / mw)
