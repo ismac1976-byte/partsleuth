@@ -3,7 +3,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { collection, onSnapshot, doc, updateDoc, increment } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
-import { useParams } from 'next/navigation'
+import { useParams, useSearchParams } from 'next/navigation'
 import type { ChecklistLine, ScanResult, Detection, DetectionStatus } from '@/lib/types'
 import Link from 'next/link'
 
@@ -60,14 +60,17 @@ const CONFIDENCE_BADGE: Record<string, string> = {
 // ── Main component ───────────────────────────────────────────────────────────
 
 export default function ScanPage() {
-  const { setNum } = useParams<{ setNum: string }>()
+  const { setNum }    = useParams<{ setNum: string }>()
+  const searchParams  = useSearchParams()
+  const initialMode   = (searchParams.get('mode') as InputMode) === 'photo' ? 'photo' : 'camera'
+
   const videoRef   = useRef<HTMLVideoElement>(null)
   const canvasRef  = useRef<HTMLCanvasElement>(null)
   const fileRef    = useRef<HTMLInputElement>(null)
   const streamRef  = useRef<MediaStream | null>(null)
 
   const [checklist,    setChecklist]   = useState<ChecklistLine[]>([])
-  const [inputMode,    setInputMode]   = useState<InputMode>('camera')
+  const [inputMode,    setInputMode]   = useState<InputMode>(initialMode)
   const [scanState,    setScanState]   = useState<ScanState>('idle')
   const [result,       setResult]      = useState<ScanResult | null>(null)
   const [errorMsg,     setErrorMsg]    = useState('')
@@ -235,23 +238,9 @@ export default function ScanPage() {
       {/* Header */}
       <div className="flex items-center gap-3 pt-1">
         <Link href={`/sets/${setNum}`} className="btn-ghost text-sm -ml-2">← Back</Link>
-        <h1 className="text-2xl font-black text-brand-900">Scan Bricks</h1>
-      </div>
-
-      {/* Mode toggle */}
-      <div className="flex rounded-xl overflow-hidden border border-brand-900/10 bg-white">
-        {(['camera', 'photo'] as InputMode[]).map(mode => (
-          <button
-            key={mode}
-            onClick={() => switchMode(mode)}
-            className={`flex-1 py-2.5 text-sm font-semibold transition-colors
-              ${inputMode === mode
-                ? 'bg-brand-900 text-white'
-                : 'text-brand-900/50 hover:text-brand-900'}`}
-          >
-            {mode === 'camera' ? '📹 Live Camera' : '📷 Take Photo'}
-          </button>
-        ))}
+        <h1 className="text-2xl font-black text-brand-900">
+          {inputMode === 'camera' ? '📹 Live Camera' : '📷 Take Photo'}
+        </h1>
       </div>
 
       {/* Hidden canvas for frame capture */}

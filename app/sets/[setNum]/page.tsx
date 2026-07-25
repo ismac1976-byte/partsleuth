@@ -178,14 +178,22 @@ export default function SetDetailPage() {
 
       {/* Actions */}
       {checklist.length > 0 ? (
-        <div className="flex gap-3">
-          <Link href={`/sets/${setNum}/scan`}
-                className="btn-primary flex-1 text-center text-base py-4">
-            📷  Scan Bricks
-          </Link>
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <Link href={`/sets/${setNum}/scan?mode=camera`}
+                  className="btn-primary text-center text-base py-4 flex flex-col items-center gap-1">
+              <span className="text-2xl leading-none">📹</span>
+              <span className="text-sm font-bold">Live Camera</span>
+            </Link>
+            <Link href={`/sets/${setNum}/scan?mode=photo`}
+                  className="btn-primary text-center text-base py-4 flex flex-col items-center gap-1">
+              <span className="text-2xl leading-none">📷</span>
+              <span className="text-sm font-bold">Take Photo</span>
+            </Link>
+          </div>
           <Link href={`/sets/${setNum}/missing`}
-                className="btn-secondary px-5">
-            📋 Missing
+                className="btn-secondary w-full text-center text-sm py-3 block">
+            📋 View Missing Parts
           </Link>
         </div>
       ) : (
