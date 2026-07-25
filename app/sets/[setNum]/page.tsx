@@ -120,6 +120,10 @@ export default function SetDetailPage() {
     .filter(l => l.quantityFound < l.quantityNeeded)
     .sort((a, b) => b.quantityNeeded - a.quantityNeeded)
 
+  // LEGO official instructions URL — strip the "-1" variant suffix
+  const baseSetNum      = setNum.split('-')[0]
+  const instructionsUrl = `https://www.lego.com/en-us/service/buildinginstructions/${baseSetNum}`
+
   if (isSetLoading) {
     return (
       <div className="space-y-4 pt-2">
@@ -195,6 +199,10 @@ export default function SetDetailPage() {
                 className="btn-secondary w-full text-center text-sm py-3 block">
             📋 View Missing Parts
           </Link>
+          <a href={instructionsUrl} target="_blank" rel="noopener noreferrer"
+             className="btn-secondary w-full text-center text-sm py-3 block">
+            📖 Building Instructions
+          </a>
         </div>
       ) : (
         <div className="space-y-3">
@@ -211,6 +219,10 @@ export default function SetDetailPage() {
               </span>
             ) : '📋  Load Parts List'}
           </button>
+          <a href={instructionsUrl} target="_blank" rel="noopener noreferrer"
+             className="btn-secondary w-full text-center text-sm py-3 block">
+            📖 Building Instructions
+          </a>
           <div className="card bg-lego-cream border-0 py-4 text-center space-y-1">
             <p className="text-sm font-semibold text-brand-900/60">What does this do?</p>
             <p className="text-xs text-brand-900/40">
