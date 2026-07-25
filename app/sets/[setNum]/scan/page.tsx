@@ -1,83 +1,95 @@
 'use client'
 
+/**
+ * Scan page — v4
+ *
+ * Architecture (see api/scan.py header for the full rationale):
+ *  - The phone downscales the image to ≤800px BEFORE upload (~80 KB, not MBs)
+ *  - /api/scan is a thin Claude proxy returning raw pieces only
+ *  - Checklist matching happens here (lib/matching.ts) — no checklist upload
+ *  - Bounding boxes are drawn as %-positioned overlays on the exact image
+ *    Claude analysed → always aligned, never cropped
+ */
+
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { collection, onSnapshot, doc, updateDoc, increment } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
 import { useParams, useSearchParams } from 'next/navigation'
 import type { ChecklistLine, ScanResult, Detection, DetectionStatus } from '@/lib/types'
+import { matchDetections, summarize, type RawPiece } from '@/lib/matching'
 import Link from 'next/link'
 
 type ScanState = 'idle' | 'processing' | 'result' | 'error'
 type InputMode = 'camera' | 'photo'
 
-// ── API format helpers ───────────────────────────────────────────────────────
+const MAX_DIM = 800          // must match what api/scan.py expects
+const JPEG_Q  = 0.78
 
-function lineToApiFormat(l: ChecklistLine) {
-  return {
-    line_id:         l.lineId,
-    part_num:        l.partNum,
-    bricklink_ids:   l.bricklinkIds,
-    color_id:        l.colorId,
-    color_name:      l.colorName,
-    quantity_needed: l.quantityNeeded,
-    quantity_found:  l.quantityFound,
-  }
-}
-
-function mapDetection(d: Record<string, any>): Detection {
-  return {
-    partNum:    d.part_num    ?? null,
-    color:      d.color       ?? null,
-    name:       d.name        ?? null,
-    confidence: d.confidence  ?? 'none',
-    bboxPct:    d.bbox_pct    ?? [0, 0, 1, 1],
-    status:     d.status      ?? 'unknown',
-    checklistMatches: (d.checklist_matches ?? []).map((m: any) => ({
-      lineId:         m.line_id,
-      colorName:      m.color_name,
-      quantityNeeded: m.quantity_needed,
-      quantityFound:  m.quantity_found,
-    })),
-  }
-}
-
-// ── Status config ────────────────────────────────────────────────────────────
+// ── Status display config ────────────────────────────────────────────────────
 
 const STATUS_CONFIG: Record<DetectionStatus, {
-  dot: string; card: string; label: string
+  dot: string; card: string; label: string; box: string
 }> = {
-  needed:      { dot: 'bg-green-500',  card: 'border-green-200 bg-green-50',   label: 'Needed'       },
-  have_enough: { dot: 'bg-yellow-400', card: 'border-yellow-200 bg-yellow-50', label: 'Have enough'  },
-  wrong_color: { dot: 'bg-orange-400', card: 'border-orange-200 bg-orange-50', label: 'Wrong colour' },
-  not_in_set:  { dot: 'bg-gray-300',   card: 'border-gray-200',                label: 'Not in set'   },
-  unknown:     { dot: 'bg-red-500',    card: 'border-red-200 bg-red-50',       label: 'Unknown'      },
+  needed:      { dot: 'bg-green-500',  card: 'border-green-200 bg-green-50',   label: 'Needed',       box: '#22c55e' },
+  have_enough: { dot: 'bg-yellow-400', card: 'border-yellow-200 bg-yellow-50', label: 'Have enough',  box: '#eab308' },
+  wrong_color: { dot: 'bg-orange-400', card: 'border-orange-200 bg-orange-50', label: 'Wrong colour', box: '#fb923c' },
+  not_in_set:  { dot: 'bg-gray-300',   card: 'border-gray-200',                label: 'Not in set',   box: '#9ca3af' },
+  unknown:     { dot: 'bg-red-500',    card: 'border-red-200 bg-red-50',       label: 'Unknown',      box: '#ef4444' },
 }
 
 const CONFIDENCE_BADGE: Record<string, string> = {
   high: '', medium: '~', low: '?', none: '??',
 }
 
+// ── Client-side image downscaling ────────────────────────────────────────────
+
+interface Captured { dataUrl: string; b64: string }
+
+function canvasToCaptured(source: HTMLVideoElement | HTMLImageElement,
+                          sw: number, sh: number): Captured {
+  const scale = Math.min(1, MAX_DIM / Math.max(sw, sh))
+  const c = document.createElement('canvas')
+  c.width  = Math.round(sw * scale)
+  c.height = Math.round(sh * scale)
+  c.getContext('2d')!.drawImage(source, 0, 0, c.width, c.height)
+  const dataUrl = c.toDataURL('image/jpeg', JPEG_Q)
+  return { dataUrl, b64: dataUrl.split(',')[1] }
+}
+
+function downscaleFile(file: File): Promise<Captured> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+    img.onload = () => {
+      try { resolve(canvasToCaptured(img, img.naturalWidth, img.naturalHeight)) }
+      catch (e) { reject(e) }
+      finally { URL.revokeObjectURL(url) }
+    }
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not read that photo')) }
+    img.src = url
+  })
+}
+
 // ── Main component ───────────────────────────────────────────────────────────
 
 export default function ScanPage() {
-  const { setNum }    = useParams<{ setNum: string }>()
-  const searchParams  = useSearchParams()
-  const initialMode   = (searchParams.get('mode') as InputMode) === 'photo' ? 'photo' : 'camera'
+  const { setNum }   = useParams<{ setNum: string }>()
+  const searchParams = useSearchParams()
+  const inputMode: InputMode =
+    (searchParams.get('mode') as InputMode) === 'photo' ? 'photo' : 'camera'
 
-  const videoRef   = useRef<HTMLVideoElement>(null)
-  const canvasRef  = useRef<HTMLCanvasElement>(null)
-  const fileRef    = useRef<HTMLInputElement>(null)
-  const streamRef  = useRef<MediaStream | null>(null)
+  const videoRef  = useRef<HTMLVideoElement>(null)
+  const fileRef   = useRef<HTMLInputElement>(null)
+  const streamRef = useRef<MediaStream | null>(null)
 
-  const [checklist,    setChecklist]   = useState<ChecklistLine[]>([])
-  const [inputMode,    setInputMode]   = useState<InputMode>(initialMode)
-  const [scanState,    setScanState]   = useState<ScanState>('idle')
-  const [result,       setResult]      = useState<ScanResult | null>(null)
-  const [errorMsg,     setErrorMsg]    = useState('')
-  const [cameraReady,  setCameraReady] = useState(false)
-  const [cameraError,  setCameraError] = useState('')
-  const [photoPreview, setPhotoPreview] = useState<string | null>(null)   // data-url for photo mode
-  const [photoB64,     setPhotoB64]    = useState<string | null>(null)    // raw b64 for API
+  const [checklist,   setChecklist]   = useState<ChecklistLine[]>([])
+  const [scanState,   setScanState]   = useState<ScanState>('idle')
+  const [captured,    setCaptured]    = useState<Captured | null>(null)
+  const [result,      setResult]      = useState<ScanResult | null>(null)
+  const [errorMsg,    setErrorMsg]    = useState('')
+  const [cameraReady, setCameraReady] = useState(false)
+  const [cameraError, setCameraError] = useState('')
+  const [elapsed,     setElapsed]     = useState(0)
 
   // Live checklist subscription
   useEffect(() => {
@@ -86,7 +98,7 @@ export default function ScanPage() {
     })
   }, [setNum])
 
-  // Start camera when in camera mode
+  // Camera lifecycle
   useEffect(() => {
     if (inputMode !== 'camera') return
     let cancelled = false
@@ -117,65 +129,18 @@ export default function ScanPage() {
     }
   }, [inputMode])
 
-  // Switch modes: stop camera, clear state
-  function switchMode(mode: InputMode) {
-    if (mode === inputMode) return
-    streamRef.current?.getTracks().forEach(t => t.stop())
-    streamRef.current = null
-    setCameraReady(false)
-    setCameraError('')
-    setPhotoPreview(null)
-    setPhotoB64(null)
-    setResult(null)
-    setScanState('idle')
-    setErrorMsg('')
-    setInputMode(mode)
-  }
+  // Elapsed-seconds ticker while scanning
+  useEffect(() => {
+    if (scanState !== 'processing') { setElapsed(0); return }
+    const t0 = Date.now()
+    const id = setInterval(() => setElapsed(Math.round((Date.now() - t0) / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [scanState])
 
-  // ── Camera capture ──
+  // ── Scan logic ──
 
-  function captureFrame(): string {
-    const v = videoRef.current!
-    const c = canvasRef.current!
-    c.width  = v.videoWidth
-    c.height = v.videoHeight
-    c.getContext('2d')!.drawImage(v, 0, 0)
-    return c.toDataURL('image/jpeg', 0.85).split(',')[1]
-  }
-
-  const handleCameraScan = useCallback(async () => {
-    if (!cameraReady) return
-    const b64 = captureFrame()
-    await runScan(b64)
-  }, [checklist, setNum, cameraReady])
-
-  // ── Photo file pick — auto-scans immediately after selection ──
-
-  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    if (!file) return
-    const reader = new FileReader()
-    reader.onload = ev => {
-      const dataUrl = ev.target?.result as string
-      const b64 = dataUrl.split(',')[1]
-      setPhotoPreview(dataUrl)
-      setPhotoB64(b64)
-      setResult(null)
-      setErrorMsg('')
-      // Auto-scan straight away — no second button needed
-      runScan(b64)
-    }
-    reader.readAsDataURL(file)
-  }
-
-  async function handlePhotoScan() {
-    if (!photoB64) return
-    await runScan(photoB64)
-  }
-
-  // ── Shared scan logic ──
-
-  async function runScan(b64: string) {
+  const runScan = useCallback(async (cap: Captured) => {
+    setCaptured(cap)
     setScanState('processing')
     setResult(null)
     setErrorMsg('')
@@ -184,10 +149,7 @@ export default function ScanPage() {
       const resp = await fetch('/api/scan', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          image_b64: b64,
-          checklist: checklist.map(lineToApiFormat),
-        }),
+        body:    JSON.stringify({ image_b64: cap.b64 }),
       })
 
       if (!resp.ok) {
@@ -196,25 +158,33 @@ export default function ScanPage() {
       }
 
       const data = await resp.json()
-      const scanResult: ScanResult = {
-        annotatedImageB64: data.annotated_image_b64,
-        detections: (data.detections ?? []).map(mapDetection),
-        summary: {
-          totalDetected: data.summary.total_detected,
-          needed:        data.summary.needed,
-          haveEnough:    data.summary.have_enough,
-          wrongColor:    data.summary.wrong_color  ?? 0,
-          notInSet:      data.summary.not_in_set,
-          unknown:       data.summary.unknown      ?? 0,
-        },
-      }
+      const detections = matchDetections((data.pieces ?? []) as RawPiece[], checklist)
+      const scanResult: ScanResult = { detections, summary: summarize(detections) }
 
       setResult(scanResult)
       setScanState('result')
-      await persistFinds(setNum, scanResult.detections)
+      await persistFinds(setNum, detections)
 
     } catch (e: any) {
       setErrorMsg(e.message ?? 'Scan failed — please try again')
+      setScanState('error')
+    }
+  }, [checklist, setNum])
+
+  function handleCameraScan() {
+    const v = videoRef.current
+    if (!v || !cameraReady) return
+    runScan(canvasToCaptured(v, v.videoWidth, v.videoHeight))
+  }
+
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    try {
+      const cap = await downscaleFile(file)
+      runScan(cap)               // auto-scan immediately
+    } catch (err: any) {
+      setErrorMsg(err.message ?? 'Could not read that photo')
       setScanState('error')
     }
   }
@@ -222,17 +192,15 @@ export default function ScanPage() {
   function scanAgain() {
     setScanState('idle')
     setResult(null)
+    setCaptured(null)
     setErrorMsg('')
-    if (inputMode === 'photo') {
-      setPhotoPreview(null)
-      setPhotoB64(null)
-      if (fileRef.current) fileRef.current.value = ''
-    }
+    if (fileRef.current) fileRef.current.value = ''
   }
 
   // ── Render ──
 
   const isProcessing = scanState === 'processing'
+  const showLiveCamera = inputMode === 'camera' && scanState === 'idle'
 
   return (
     <div className="space-y-4">
@@ -245,194 +213,151 @@ export default function ScanPage() {
         </h1>
       </div>
 
-      {/* Hidden canvas for frame capture */}
-      <canvas ref={canvasRef} className="hidden" />
+      {/* Checklist-missing warning */}
+      {checklist.length === 0 && (
+        <div className="bg-lego-yellow/90 rounded-xl px-4 py-3">
+          <p className="text-sm font-semibold text-brand-900 text-center">
+            ⚠️ Load the parts list first —{' '}
+            <Link href={`/sets/${setNum}`} className="underline">go back</Link>
+          </p>
+        </div>
+      )}
 
-      {/* ─────── CAMERA MODE ─────── */}
+      {/* Hidden file input (photo mode) */}
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        onChange={handleFileChange}
+        className="hidden"
+      />
+
+      {/* ── LIVE CAMERA (idle only) ── */}
       {inputMode === 'camera' && (
-        <div className="relative rounded-2xl overflow-hidden bg-black"
-             style={{ aspectRatio: '4/3', maxHeight: '56vh' }}>
-
-          {/* Live video */}
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            className={`w-full h-full object-cover transition-opacity duration-200
-                        ${scanState === 'result' ? 'opacity-0' : 'opacity-100'}`}
-          />
-
-          {/* Annotated result overlay */}
-          {scanState === 'result' && result?.annotatedImageB64 && (
-            <img
-              src={`data:image/jpeg;base64,${result.annotatedImageB64}`}
-              alt="Scan result"
-              className="absolute inset-0 w-full h-full object-cover"
+        <div className={showLiveCamera ? '' : 'hidden'}>
+          <div className="relative rounded-2xl overflow-hidden bg-black mx-auto flex justify-center">
+            {/* object-contain + no forced aspect: what you see is exactly
+                the frame that gets scanned — no surprise cropping */}
+            <video
+              ref={videoRef}
+              autoPlay
+              playsInline
+              muted
+              className="block w-full object-contain"
+              style={{ maxHeight: '55vh' }}
             />
-          )}
 
-          {/* Processing overlay */}
-          {isProcessing && (
-            <div className="absolute inset-0 bg-black/50 flex flex-col items-center justify-center gap-3">
-              <div className="w-14 h-14 border-4 border-white border-t-transparent
-                              rounded-full animate-spin" />
-              <p className="text-white font-semibold text-lg">Identifying bricks…</p>
-              <p className="text-white/60 text-sm">Usually 15–20 seconds</p>
-            </div>
-          )}
-
-          {/* Camera error */}
-          {cameraError && (
-            <div className="absolute inset-0 flex items-center justify-center bg-gray-900 p-6">
-              <div className="text-center space-y-3">
-                <p className="text-4xl">📷</p>
-                <p className="text-white text-sm font-medium">{cameraError}</p>
+            {cameraError && (
+              <div className="absolute inset-0 flex items-center justify-center bg-gray-900 p-6">
+                <div className="text-center space-y-3">
+                  <p className="text-4xl">📷</p>
+                  <p className="text-white text-base font-medium">{cameraError}</p>
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
-          {/* Shutter button */}
-          {scanState === 'idle' && cameraReady && !cameraError && (
-            <button
-              onClick={handleCameraScan}
-              aria-label="Scan"
-              className="absolute bottom-5 left-1/2 -translate-x-1/2 active:scale-90 transition-transform"
-              style={{ width: 72, height: 72 }}
-            >
-              <span className="absolute inset-0 rounded-full border-4 border-white opacity-80" />
-              <span className="absolute inset-2 rounded-full bg-white" />
-            </button>
-          )}
-
-          {/* Scan again pill */}
-          {scanState === 'result' && (
-            <button
-              onClick={scanAgain}
-              className="absolute bottom-4 left-1/2 -translate-x-1/2
-                         px-5 py-2.5 rounded-full bg-white/90 backdrop-blur-sm
-                         font-semibold text-brand-900 shadow-lg text-sm
-                         active:scale-95 transition-transform whitespace-nowrap"
-            >
-              📷 Scan Again
-            </button>
-          )}
-
-          {/* Checklist missing hint */}
-          {checklist.length === 0 && scanState === 'idle' && (
-            <div className="absolute top-3 left-3 right-3
-                            bg-lego-yellow/90 backdrop-blur-sm rounded-xl px-3 py-2">
-              <p className="text-xs font-semibold text-brand-900 text-center">
-                ⚠️ Load the parts list first —{' '}
-                <Link href={`/sets/${setNum}`} className="underline">go back</Link>
-              </p>
-            </div>
-          )}
+            {/* Shutter */}
+            {cameraReady && !cameraError && (
+              <button
+                onClick={handleCameraScan}
+                aria-label="Scan"
+                className="absolute bottom-5 left-1/2 -translate-x-1/2 active:scale-90 transition-transform"
+                style={{ width: 76, height: 76 }}
+              >
+                <span className="absolute inset-0 rounded-full border-4 border-white opacity-80" />
+                <span className="absolute inset-2 rounded-full bg-white" />
+              </button>
+            )}
+          </div>
         </div>
       )}
 
-      {/* ─────── PHOTO MODE ─────── */}
-      {inputMode === 'photo' && (
+      {/* ── PHOTO PICKER (photo mode, nothing captured yet) ── */}
+      {inputMode === 'photo' && !captured && scanState === 'idle' && (
+        <button
+          onClick={() => fileRef.current?.click()}
+          className="w-full rounded-2xl bg-brand-900 text-white
+                     flex flex-col items-center justify-center gap-3 py-10
+                     active:scale-[0.98] transition-transform shadow-md"
+        >
+          <span className="text-5xl">📷</span>
+          <div className="text-center">
+            <p className="font-black text-lg">Take a Photo</p>
+            <p className="text-sm text-white/60 mt-0.5">Spread bricks on a plain surface, then tap</p>
+          </div>
+        </button>
+      )}
+
+      {/* ── CAPTURED IMAGE + OVERLAY (both modes: processing & result) ── */}
+      {captured && (scanState === 'processing' || scanState === 'result') && (
         <div className="space-y-3">
-          {/* Hidden file input */}
-          <input
-            ref={fileRef}
-            type="file"
-            accept="image/*"
-            capture="environment"
-            onChange={handleFileChange}
-            className="hidden"
-          />
-
-          {!photoPreview ? (
-            /* Photo picker — big obvious tap target */
-            <button
-              onClick={() => fileRef.current?.click()}
-              className="w-full rounded-2xl bg-brand-900 text-white
-                         flex flex-col items-center justify-center gap-3 py-10
-                         active:scale-[0.98] transition-transform shadow-md"
-            >
-              <span className="text-5xl">📷</span>
-              <div className="text-center">
-                <p className="font-black text-lg">Take a Photo</p>
-                <p className="text-sm text-white/60 mt-0.5">Spread bricks on a plain surface, then tap</p>
-              </div>
-            </button>
-          ) : isProcessing ? (
-            /* Full-screen scanning state — unmissable */
-            <div className="rounded-2xl overflow-hidden bg-black relative" style={{ aspectRatio: '4/3', maxHeight: '56vh' }}>
+          <div className="flex justify-center">
+            {/* inline-block wrapper shrink-wraps the image, so the % boxes
+                always line up with the picture — nothing is ever cropped */}
+            <div className="relative inline-block rounded-2xl overflow-hidden shadow-md">
               <img
-                src={photoPreview}
-                alt="Scanning…"
-                className="w-full h-full object-cover opacity-40"
+                src={captured.dataUrl}
+                alt="Your bricks"
+                className="block max-w-full"
+                style={{ maxHeight: '55vh' }}
               />
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-5">
-                <div className="w-20 h-20 border-4 border-lego-yellow border-t-transparent
-                                rounded-full animate-spin" />
-                <div className="text-center">
-                  <p className="text-white font-black text-2xl">Identifying bricks…</p>
-                  <p className="text-white/60 text-base mt-1">This takes about 20 seconds</p>
-                </div>
-              </div>
-            </div>
-          ) : (
-            /* Preview + result */
-            <div className="space-y-3">
-              <div className="relative rounded-2xl overflow-hidden bg-black"
-                   style={{ aspectRatio: '4/3', maxHeight: '56vh' }}>
-                <img
-                  src={scanState === 'result' && result?.annotatedImageB64
-                    ? `data:image/jpeg;base64,${result.annotatedImageB64}`
-                    : photoPreview}
-                  alt="Photo preview"
-                  className="w-full h-full object-cover"
-                />
-              </div>
-              {scanState !== 'result' && (
-                <div className="flex gap-2">
-                  <button onClick={scanAgain} className="btn-ghost flex-1 py-3">
-                    ← Retake
-                  </button>
-                  <button onClick={handlePhotoScan} className="btn-primary flex-1 py-3">
-                    🔍 Scan Again
-                  </button>
+
+              {/* Bounding boxes */}
+              {scanState === 'result' && result?.detections.map((d, i) => (
+                <BoundingBox key={i} detection={d} index={i} />
+              ))}
+
+              {/* Processing scrim */}
+              {isProcessing && (
+                <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-4 px-6">
+                  <div className="w-16 h-16 border-4 border-lego-yellow border-t-transparent
+                                  rounded-full animate-spin" />
+                  <div className="text-center">
+                    <p className="text-white font-black text-xl leading-tight">
+                      Identifying bricks…
+                    </p>
+                    <p className="text-white/70 text-base mt-1">
+                      {elapsed > 0 ? `${elapsed}s — ` : ''}usually 10–15 seconds
+                    </p>
+                  </div>
                 </div>
               )}
-              {scanState === 'result' && (
-                <button onClick={scanAgain} className="btn-primary w-full py-4 text-base">
-                  📷 Scan Another Photo
-                </button>
-              )}
             </div>
+          </div>
+
+          {scanState === 'result' && (
+            <button onClick={scanAgain} className="btn-primary w-full py-4 text-base">
+              {inputMode === 'camera' ? '📹 Scan More Bricks' : '📷 Scan Another Photo'}
+            </button>
           )}
         </div>
       )}
 
-      {/* Error message */}
+      {/* ── Error ── */}
       {scanState === 'error' && errorMsg && (
-        <div className="card border-red-200 bg-red-50 text-center py-4 space-y-2">
-          <p className="font-semibold text-red-700">{errorMsg}</p>
-          <button onClick={scanAgain} className="btn-primary px-8 text-sm">Try Again</button>
+        <div className="card border-red-200 bg-red-50 text-center py-5 space-y-3">
+          <p className="font-semibold text-red-700 text-base">{errorMsg}</p>
+          <button onClick={scanAgain} className="btn-primary px-8 py-3 text-base">Try Again</button>
         </div>
       )}
 
-      {/* ── Result panel ── */}
+      {/* ── Result summary ── */}
       {scanState === 'result' && result && (
         <div className="space-y-4">
 
-          {/* Summary stats */}
-          <div className="grid grid-cols-5 gap-2">
-            <StatCard count={result.summary.needed}     label="Needed"     dotClass="bg-green-500"  />
-            <StatCard count={result.summary.haveEnough} label="Enough"     dotClass="bg-yellow-400" />
-            <StatCard count={result.summary.wrongColor} label="Wrong clr"  dotClass="bg-orange-400" />
-            <StatCard count={result.summary.notInSet}   label="Not in set" dotClass="bg-gray-300"   />
-            <StatCard count={result.summary.unknown}    label="Unknown"    dotClass="bg-red-500"    />
+          <div className="grid grid-cols-5 gap-1.5">
+            <StatCard count={result.summary.needed}     label="Needed"   dotClass="bg-green-500"  />
+            <StatCard count={result.summary.haveEnough} label="Enough"   dotClass="bg-yellow-400" />
+            <StatCard count={result.summary.wrongColor} label="Colour"   dotClass="bg-orange-400" />
+            <StatCard count={result.summary.notInSet}   label="Not set"  dotClass="bg-gray-300"   />
+            <StatCard count={result.summary.unknown}    label="Unknown"  dotClass="bg-red-500"    />
           </div>
 
           {result.summary.unknown > 0 && (
             <div className="card border-red-200 bg-red-50 py-3 text-center">
               <p className="text-sm font-semibold text-red-700">
-                🔴 {result.summary.unknown} piece{result.summary.unknown !== 1 ? 's' : ''} couldn't be identified.
+                🔴 {result.summary.unknown} piece{result.summary.unknown !== 1 ? 's' : ''} couldn&apos;t be identified.
               </p>
               <p className="text-xs text-red-500 mt-0.5">Try a clearer photo or better lighting.</p>
             </div>
@@ -446,7 +371,7 @@ export default function ScanPage() {
           )}
 
           <Link href={`/sets/${setNum}/missing`}
-                className="btn-primary w-full text-center text-base py-3.5 block">
+                className="btn-primary w-full text-center text-base py-4 block">
             View Missing →
           </Link>
 
@@ -462,10 +387,14 @@ export default function ScanPage() {
                   const displayName = d.name
                     || (d.status === 'unknown' ? 'Could not identify' : d.partNum || '—')
                   return (
-                    <div key={i} className={`card flex items-center gap-3 py-2.5 ${cfg.card}`}>
-                      <span className={`w-3 h-3 rounded-full flex-shrink-0 ${cfg.dot}`} />
+                    <div key={i} className={`card flex items-center gap-3 py-3 ${cfg.card}`}>
+                      <span className="w-6 h-6 rounded-md flex-shrink-0 flex items-center justify-center
+                                       text-[11px] font-bold text-white"
+                            style={{ backgroundColor: cfg.box }}>
+                        {i + 1}
+                      </span>
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium truncate">
+                        <p className="text-sm font-semibold truncate">
                           {badge && <span className="text-xs font-bold text-gray-400 mr-1">{badge}</span>}
                           {displayName}
                         </p>
@@ -490,7 +419,7 @@ export default function ScanPage() {
           {result.detections.length === 0 && (
             <div className="card text-center py-8 space-y-2">
               <p className="text-3xl">🔍</p>
-              <p className="font-semibold text-brand-900/70">No pieces detected</p>
+              <p className="font-semibold text-brand-900/70 text-base">No pieces detected</p>
               <p className="text-sm text-brand-900/40">
                 Spread bricks further apart on a plain, well-lit surface.
               </p>
@@ -499,13 +428,13 @@ export default function ScanPage() {
         </div>
       )}
 
-      {/* Legend — idle camera state */}
-      {inputMode === 'camera' && scanState === 'idle' && (
+      {/* Legend — idle states */}
+      {scanState === 'idle' && (
         <div className="card py-3">
           <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-2 text-center">
             What the colours mean
           </p>
-          <div className="flex flex-wrap gap-2 justify-center">
+          <div className="flex flex-wrap gap-x-3 gap-y-1.5 justify-center">
             {(Object.entries(STATUS_CONFIG) as [DetectionStatus, typeof STATUS_CONFIG[DetectionStatus]][])
               .map(([status, cfg]) => (
                 <span key={status} className="flex items-center gap-1.5 text-xs text-brand-900/60">
@@ -522,6 +451,35 @@ export default function ScanPage() {
 
 // ── Sub-components ───────────────────────────────────────────────────────────
 
+/** %-positioned bounding box — aligned with the image by construction. */
+function BoundingBox({ detection: d, index }: { detection: Detection; index: number }) {
+  const [x1, y1, x2, y2] = d.bboxPct
+  const w = x2 - x1, h = y2 - y1
+  if (w <= 0 || h <= 0) return null
+  const color = STATUS_CONFIG[d.status].box
+  return (
+    <div
+      className="absolute rounded-sm pointer-events-none"
+      style={{
+        left:   `${x1 * 100}%`,
+        top:    `${y1 * 100}%`,
+        width:  `${w * 100}%`,
+        height: `${h * 100}%`,
+        border: `2.5px solid ${color}`,
+        boxShadow: '0 0 0 1px rgba(0,0,0,0.25)',
+      }}
+    >
+      <span
+        className="absolute -top-0.5 -left-0.5 -translate-y-full text-[11px] font-bold
+                   text-white px-1.5 py-0.5 rounded-t-sm leading-tight whitespace-nowrap"
+        style={{ backgroundColor: color }}
+      >
+        {index + 1}{d.partNum ? ` · ${d.partNum}` : ''}
+      </span>
+    </div>
+  )
+}
+
 function StatCard({
   count, label, dotClass
 }: { count: number; label: string; dotClass: string }) {
@@ -529,9 +487,9 @@ function StatCard({
     <div className="card text-center py-2.5 px-1">
       <div className="flex items-center justify-center gap-1 mb-0.5">
         <span className={`w-2 h-2 rounded-full ${dotClass}`} />
-        <p className="text-2xl font-bold text-brand-900">{count}</p>
+        <p className="text-xl font-bold text-brand-900">{count}</p>
       </div>
-      <p className="text-[10px] text-gray-400 leading-tight">{label}</p>
+      <p className="text-xs text-gray-400 leading-tight">{label}</p>
     </div>
   )
 }

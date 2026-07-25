@@ -57,7 +57,6 @@ export interface Detection {
 }
 
 export interface ScanResult {
-  annotatedImageB64: string
   detections: Detection[]
   summary: {
     totalDetected: number
