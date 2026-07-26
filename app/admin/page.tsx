@@ -171,8 +171,8 @@ export default function AdminPage() {
             )}
           </div>
           <p className="text-xs text-brand-900/40">
-            Applies to Brick Pile scans (the only ones that cost money).
-            Single Brick and Whose Brick are free and never limited.
+            Applies only to AI-fallback scans — pile scans normally use the free
+            recogniser and cost nothing. Single Brick and Whose Brick are always free.
           </p>
         </div>
       )}

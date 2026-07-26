@@ -96,52 +96,103 @@ export default function ScanPage() {
 
   // ── Scan logic ──
 
+  // FREE pile identification: Brickognize part numbers + pixel colour vs
+  // checklist RGB. Zero token cost. Validated 20/20 part & colour on fresh
+  // sets before rollout. Quantity-aware across duplicate pieces in one scan.
+  function buildFreeDetections(
+    seg: SegmentResult,
+    candidatesByIndex: Map<number, BKCandidate[]>,
+  ): Detection[] {
+    const counted = new Map<string, number>()
+    return seg.pieces.map((sp, idx) => {
+      const cands = candidatesByIndex.get(idx + 1) ?? []
+      const res   = matchSingle(cands, sp.rgb, checklist)
+      let status  = res.status
+      if (status === 'needed' && res.line) {
+        const extra = counted.get(res.line.lineId) ?? 0
+        if (res.line.quantityFound + extra >= res.line.quantityNeeded) {
+          status = 'have_enough'
+        } else {
+          counted.set(res.line.lineId, extra + 1)
+        }
+      }
+      const confidence =
+        res.score >= 0.4 ? 'high' : res.score >= 0.2 ? 'medium'
+        : res.partNum ? 'low' : 'none'
+      return {
+        partNum: res.partNum,
+        color:   res.line?.colorName ?? null,
+        name:    res.line?.partName ?? null,
+        confidence,
+        bboxPct: sp.bboxPct,
+        status,
+        checklistMatches: res.line ? [{
+          lineId:         res.line.lineId,
+          colorName:      res.line.colorName,
+          quantityNeeded: res.line.quantityNeeded,
+          quantityFound:  res.line.quantityFound,
+        }] : [],
+      } as Detection
+    })
+  }
+
   const runScan = useCallback(async (seg: SegmentResult) => {
     setCaptured(seg.display)
     setScanState('processing')
     setResult(null)
     setErrorMsg('')
 
-    try {
-      const usingCrops = seg.pieces.length > 0
+    async function post(body: object) {
       const resp = await fetch('/api/scan', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(usingCrops
-          ? { crops: seg.pieces.map(p => p.cropB64),     // exact boxes stay on-device
-              catalog: buildCatalog(checklist) }         // set's real inventory → multiple-choice ID
-          : { image_b64: seg.display.b64 }),             // fallback: whole image
+        body:    JSON.stringify(body),
       })
-
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}))
         throw new Error(err.error || `Server error ${resp.status}`)
       }
+      return resp.json()
+    }
 
-      const data = await resp.json()
-      let pieces: RawPiece[]
+    try {
+      let detections: Detection[]
 
-      if (usingCrops) {
-        // Attach our CV boxes to Claude's per-crop identifications.
-        // Crops Claude skipped still get a box, shown as unknown.
-        const byIndex = new Map<number, any>()
-        for (const p of (data.pieces ?? [])) byIndex.set(p.i, p)
-        pieces = seg.pieces.map((sp, idx) => {
-          const p = byIndex.get(idx + 1)
-          return {
-            part_num:   p?.part_num ?? null,
-            color:      p?.color ?? null,
-            confidence: p?.confidence ?? 'none',
-            bbox_pct:   sp.bboxPct,
-          }
-        })
+      if (seg.pieces.length > 0) {
+        try {
+          // Primary: FREE recogniser for every crop (no tokens, no limit)
+          const data = await post({ crops_free: seg.pieces.map(p => p.cropB64) })
+          const byIndex = new Map<number, BKCandidate[]>()
+          for (const r of (data.results ?? [])) byIndex.set(r.i, r.candidates ?? [])
+          const anyHit = Array.from(byIndex.values()).some(c => c.length > 0)
+          if (!anyHit) throw new Error('recogniser returned nothing')
+          detections = buildFreeDetections(seg, byIndex)
+        } catch {
+          // Automatic fallback: Claude path (rate-limited, costs ~0.5p)
+          const data = await post({
+            crops:   seg.pieces.map(p => p.cropB64),
+            catalog: buildCatalog(checklist),
+          })
+          const byIndex = new Map<number, any>()
+          for (const p of (data.pieces ?? [])) byIndex.set(p.i, p)
+          const pieces: RawPiece[] = seg.pieces.map((sp, idx) => {
+            const p = byIndex.get(idx + 1)
+            return {
+              part_num:   p?.part_num ?? null,
+              color:      p?.color ?? null,
+              confidence: p?.confidence ?? 'none',
+              bbox_pct:   sp.bboxPct,
+            }
+          })
+          detections = matchDetections(pieces, checklist)
+        }
       } else {
-        pieces = (data.pieces ?? []) as RawPiece[]
+        // No pieces detected on-device: whole-image Claude fallback
+        const data = await post({ image_b64: seg.display.b64 })
+        detections = matchDetections((data.pieces ?? []) as RawPiece[], checklist)
       }
 
-      const detections = matchDetections(pieces, checklist)
       const scanResult: ScanResult = { detections, summary: summarize(detections) }
-
       setResult(scanResult)
       setScanState('result')
       await persistFinds(setNum, detections)

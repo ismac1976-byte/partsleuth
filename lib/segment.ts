@@ -14,9 +14,12 @@
 //   4. Connected components → per-piece bounding boxes
 //   5. Crop each piece from the FULL-RESOLUTION source for identification
 
+import { dominantColour } from './colour'
+
 export interface SegmentedPiece {
   bboxPct: [number, number, number, number]   // x1,y1,x2,y2 as 0–1 fractions
   cropB64: string                             // high-res crop, JPEG base64
+  rgb: [number, number, number] | null        // dominant piece colour (for free matching)
 }
 
 export interface SegmentResult {
@@ -174,6 +177,7 @@ export function segmentBricks(
     return {
       bboxPct: [fx1, fy1, fx2, fy2] as [number, number, number, number],
       cropB64: cc.toDataURL('image/jpeg', 0.82).split(',')[1],
+      rgb: dominantColour(cc),
     }
   })
 

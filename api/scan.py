@@ -380,6 +380,30 @@ class handler(BaseHTTPRequestHandler):
                 ]})
                 return
 
+            # FREE pile mode: all crops through Brickognize in parallel.
+            # No Claude, no cost, no rate limit. Validated 20/20 part /
+            # 20/20 colour on fresh sets before rollout. The client falls
+            # back to the Claude path below if this returns nothing.
+            free = body.get('crops_free')
+            if isinstance(free, list) and free:
+                pool = concurrent.futures.ThreadPoolExecutor(max_workers=12)
+                try:
+                    futs = [pool.submit(_brickognize, c) for c in free[:40]]
+                    out = []
+                    for i, fut in enumerate(futs, start=1):
+                        try:
+                            cands = fut.result(timeout=20)
+                        except Exception:
+                            cands = []
+                        out.append({'i': i, 'candidates': [
+                            {'part_num': pid, 'score': round(s, 3)}
+                            for pid, s in cands[:6]
+                        ]})
+                    self._json(200, {'results': out})
+                finally:
+                    pool.shutdown(wait=False)
+                return
+
             crops  = body.get('crops')
             if isinstance(crops, list) and crops:
                 if not usage_allowed():
