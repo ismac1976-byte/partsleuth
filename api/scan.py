@@ -20,13 +20,84 @@ POST  { image_b64 }              (fallback: whole image, Claude estimates boxes)
 →     { pieces: [ { part_num, color, confidence, bbox_pct } ] }
 """
 
-import os, json, re, base64
+import os, json, re, base64, time
 import concurrent.futures
 from http.server import BaseHTTPRequestHandler
 
 import httpx
 
 ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+
+# ── Daily usage limit (admin-approvable in the app) ──────────────────────────
+# Counts only Claude-costing scans (Brick Pile). Single Brick / Whose Brick
+# use the free recogniser and are never limited. The check is cached for 20s
+# per warm lambda (zero added latency for scan sessions) and FAILS OPEN —
+# a limiter outage can never break scanning.
+
+_FB_PROJECT = os.environ.get('NEXT_PUBLIC_FIREBASE_PROJECT_ID', '')
+_FS_DOC     = (f'https://firestore.googleapis.com/v1/projects/{_FB_PROJECT}'
+               f'/databases/(default)/documents/config/usage')
+_LIMIT_MSG  = ('Daily scan limit reached — ask the admin to approve more '
+               'scans in Admin ⚙️')
+_usage_cache = {'t': 0.0, 'ok': True, 'stale_date': False}
+
+
+def _today() -> str:
+    return time.strftime('%Y-%m-%d', time.gmtime())
+
+
+def usage_allowed() -> bool:
+    now = time.time()
+    if now - _usage_cache['t'] < 20:
+        return _usage_cache['ok']
+    ok, stale = True, False
+    try:
+        r = httpx.get(_FS_DOC, timeout=4.0)
+        if r.status_code == 200:
+            f = r.json().get('fields', {})
+            date    = f.get('date', {}).get('stringValue', '')
+            count   = int(f.get('count', {}).get('integerValue', '0'))
+            limit   = int(f.get('limit', {}).get('integerValue', '100'))
+            blocked = f.get('blocked', {}).get('booleanValue', False)
+            if date == _today():
+                if blocked or count >= limit:
+                    ok = False
+            else:
+                stale = True          # new day — counter resets on next bump
+        # 404 (no doc yet) → allowed
+    except Exception:
+        pass                          # fail open
+    _usage_cache.update(t=now, ok=ok, stale_date=stale)
+    return ok
+
+
+def bump_usage():
+    """Fire-and-forget: +1 scan today (resets the counter on a new day)."""
+    try:
+        if not _FB_PROJECT:
+            return
+        if _usage_cache.get('stale_date'):
+            # new day → reset date/count, clear block, keep the limit field
+            httpx.patch(
+                _FS_DOC + '?updateMask.fieldPaths=date&updateMask.fieldPaths=count'
+                          '&updateMask.fieldPaths=blocked',
+                json={'fields': {
+                    'date':    {'stringValue': _today()},
+                    'count':   {'integerValue': '1'},
+                    'blocked': {'booleanValue': False},
+                }}, timeout=4.0)
+            _usage_cache['stale_date'] = False
+        else:
+            httpx.post(
+                _FS_DOC.rsplit('/config/usage', 1)[0] + ':commit',
+                json={'writes': [{'transform': {
+                    'document': (f'projects/{_FB_PROJECT}/databases/(default)'
+                                 f'/documents/config/usage'),
+                    'fieldTransforms': [
+                        {'fieldPath': 'count', 'increment': {'integerValue': '1'}}],
+                }}]}, timeout=4.0)
+    except Exception:
+        pass
 
 # ── Brickognize: specialised brick recogniser for exact part numbers ─────────
 # Free public API, ~0.2-1s per image. Runs in PARALLEL with the Claude call,
@@ -308,16 +379,26 @@ class handler(BaseHTTPRequestHandler):
 
             crops  = body.get('crops')
             if isinstance(crops, list) and crops:
+                if not usage_allowed():
+                    self._json(429, {'error': _LIMIT_MSG})
+                    return
                 catalog = body.get('catalog')
                 if not (isinstance(catalog, list) and all(isinstance(x, str) for x in catalog)):
                     catalog = None
-                self._json(200, {'pieces': identify_crops(crops[:40], catalog)})
+                pieces = identify_crops(crops[:40], catalog)
+                bump_usage()
+                self._json(200, {'pieces': pieces})
                 return
             image_b64 = body.get('image_b64')
             if not image_b64:
                 self._json(400, {'error': 'crops or image_b64 is required'})
                 return
-            self._json(200, {'pieces': identify_full(image_b64)})
+            if not usage_allowed():
+                self._json(429, {'error': _LIMIT_MSG})
+                return
+            pieces = identify_full(image_b64)
+            bump_usage()
+            self._json(200, {'pieces': pieces})
         except Exception as e:
             self._json(500, {'error': str(e)})
 

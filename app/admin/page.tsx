@@ -1,10 +1,16 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { collection, getDocs, doc, updateDoc, deleteDoc } from 'firebase/firestore'
+import { collection, getDocs, doc, getDoc, setDoc, updateDoc, deleteDoc } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
 import { getSession } from '../components/PasscodeGate'
 import Link from 'next/link'
+
+interface Usage { date: string; count: number; limit: number; blocked: boolean }
+
+function todayStr() {
+  return new Date().toISOString().slice(0, 10)
+}
 
 interface PSUser {
   userId: string; name: string; pin: string; isAdmin: boolean; createdAt: number
@@ -19,12 +25,55 @@ export default function AdminPage() {
   const [confirmDel, setConfirmDel] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
+  // Usage / rate limit
+  const [usage, setUsage]           = useState<Usage | null>(null)
+  const [limitDraft, setLimitDraft] = useState('')
+  const [usageBusy, setUsageBusy]   = useState(false)
+
   useEffect(() => {
     const s = getSession()
     if (!s || !s.isAdmin) { setAuthorized(false); return }
     setAuthorized(true)
     loadUsers()
+    loadUsage()
   }, [])
+
+  async function loadUsage() {
+    const ref  = doc(db, 'config', 'usage')
+    const snap = await getDoc(ref)
+    if (!snap.exists()) {
+      const fresh: Usage = { date: todayStr(), count: 0, limit: 100, blocked: false }
+      await setDoc(ref, fresh)
+      setUsage(fresh); setLimitDraft('100')
+      return
+    }
+    const u = snap.data() as Usage
+    // display 0 if the stored counter is from a previous day
+    const shown = u.date === todayStr() ? u : { ...u, count: 0 }
+    setUsage(shown)
+    setLimitDraft(String(u.limit ?? 100))
+  }
+
+  async function saveLimit() {
+    const n = parseInt(limitDraft, 10)
+    if (!Number.isFinite(n) || n < 1) return
+    setUsageBusy(true)
+    await setDoc(doc(db, 'config', 'usage'), { limit: n }, { merge: true })
+    await loadUsage(); setUsageBusy(false)
+  }
+
+  async function approveResume() {
+    setUsageBusy(true)
+    await setDoc(doc(db, 'config', 'usage'),
+      { date: todayStr(), count: 0, blocked: false }, { merge: true })
+    await loadUsage(); setUsageBusy(false)
+  }
+
+  async function pauseScanning() {
+    setUsageBusy(true)
+    await setDoc(doc(db, 'config', 'usage'), { blocked: true }, { merge: true })
+    await loadUsage(); setUsageBusy(false)
+  }
 
   async function loadUsers() {
     setLoading(true)
@@ -65,6 +114,68 @@ export default function AdminPage() {
         <Link href="/" className="btn-ghost text-sm -ml-2">Back</Link>
         <h1 className="text-2xl font-black text-brand-900">Admin</h1>
       </div>
+
+      {/* ── Scan usage & daily limit ── */}
+      {usage && (
+        <div className={`card space-y-3 ${usage.blocked || usage.count >= usage.limit
+                          ? 'border-red-200 bg-red-50' : ''}`}>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="font-bold text-brand-900">Scan usage today</p>
+              <p className="text-sm text-brand-900/50 mt-0.5">
+                {Math.min(usage.count, usage.limit)} of {usage.limit} pile scans used
+              </p>
+            </div>
+            {usage.blocked || usage.count >= usage.limit ? (
+              <span className="text-xs font-bold bg-red-500 text-white px-3 py-1 rounded-full">
+                ⛔ Scanning paused
+              </span>
+            ) : (
+              <span className="text-xs font-bold bg-green-100 text-green-700 px-3 py-1 rounded-full">
+                ✓ Active
+              </span>
+            )}
+          </div>
+
+          <div className="progress-track">
+            <div className="progress-fill"
+                 style={{ width: `${Math.min(100, 100 * usage.count / Math.max(1, usage.limit))}%`,
+                          background: usage.count >= usage.limit
+                            ? '#ef4444'
+                            : 'linear-gradient(90deg, #22c55e, #16a34a)' }} />
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs font-semibold text-brand-900/60">Daily limit</label>
+            <input type="text" inputMode="numeric" value={limitDraft}
+                   onChange={e => setLimitDraft(e.target.value.replace(/\D/g, '').slice(0, 5))}
+                   className="input-base text-center font-bold"
+                   style={{ width: 80, padding: '6px 10px' }} />
+            <button onClick={saveLimit}
+                    disabled={usageBusy || !limitDraft || String(usage.limit) === limitDraft}
+                    className="btn-secondary text-xs py-2 px-4">
+              Save limit
+            </button>
+            {(usage.blocked || usage.count >= usage.limit) ? (
+              <button onClick={approveResume} disabled={usageBusy}
+                      className="text-xs font-bold text-white bg-green-500 hover:bg-green-600
+                                 rounded-full px-4 py-2 transition-colors disabled:opacity-50">
+                ✓ Approve &amp; resume
+              </button>
+            ) : (
+              <button onClick={pauseScanning} disabled={usageBusy}
+                      className="text-xs font-semibold text-red-500 border border-red-200
+                                 rounded-full px-4 py-2 hover:bg-red-50 transition-colors disabled:opacity-50">
+                Pause scanning
+              </button>
+            )}
+          </div>
+          <p className="text-xs text-brand-900/40">
+            Applies to Brick Pile scans (the only ones that cost money).
+            Single Brick and Whose Brick are free and never limited.
+          </p>
+        </div>
+      )}
 
       {loading ? (
         <div className="card py-6 text-center text-brand-900/50 text-sm">Loading users...</div>
