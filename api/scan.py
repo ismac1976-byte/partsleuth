@@ -34,7 +34,10 @@ ANTHROPIC_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 # per warm lambda (zero added latency for scan sessions) and FAILS OPEN —
 # a limiter outage can never break scanning.
 
-_FB_PROJECT = os.environ.get('NEXT_PUBLIC_FIREBASE_PROJECT_ID', '')
+# Fallback hardcoded: NEXT_PUBLIC_* vars are not always exposed to Python
+# functions at runtime, and the project id is public anyway (it ships in
+# the client JS). Without it the limiter would silently fail open.
+_FB_PROJECT = os.environ.get('NEXT_PUBLIC_FIREBASE_PROJECT_ID') or 'partsleuth'
 _FS_DOC     = (f'https://firestore.googleapis.com/v1/projects/{_FB_PROJECT}'
                f'/databases/(default)/documents/config/usage')
 _LIMIT_MSG  = ('Daily scan limit reached — ask the admin to approve more '
