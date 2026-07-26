@@ -37,7 +37,8 @@ export const AuthContext = createContext<UserSession | null>(null)
 export function useAuth() { return useContext(AuthContext) }
 
 // ── Screen type ───────────────────────────────────────────────────────────────
-type Screen = 'loading' | 'enter_name' | 'enter_pin_login' | 'set_pin' | 'confirm_pin' | 'unlocked'
+type Screen = 'loading' | 'enter_name' | 'enter_details' | 'enter_pin_login'
+            | 'set_pin' | 'confirm_pin' | 'unlocked'
 
 
 export default function PasscodeGate({ children }: { children: React.ReactNode }) {
@@ -48,6 +49,11 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
   const [name,      setName]      = useState('')
   const [nameError, setNameError] = useState('')
   const [nameBusy,  setNameBusy]  = useState(false)
+
+  // first-time details (real identity, shown in Admin)
+  const [firstName,    setFirstName]    = useState('')
+  const [surname,      setSurname]      = useState('')
+  const [detailsError, setDetailsError] = useState('')
 
   // PIN entry
   const [digits,   setDigits]   = useState('')
@@ -74,14 +80,24 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
         setScreen('enter_pin_login')
         setPinLabel(`Welcome back, ${trimmed.split(' ')[0]}!`)
       } else {
-        setScreen('set_pin')
-        setPinLabel('Choose a 4-digit PIN')
+        // New user — collect their real name first (shown in Admin)
+        setScreen('enter_details')
       }
     } catch {
       setNameError('Connection error — please try again')
     } finally {
       setNameBusy(false)
     }
+  }
+
+  // ── Details step (first-time users) ──────────────────────────────────────────
+  function handleDetailsSubmit() {
+    if (!firstName.trim() || !surname.trim()) {
+      setDetailsError('Please fill in both names'); return
+    }
+    setDetailsError('')
+    setScreen('set_pin')
+    setPinLabel('Choose a 4-digit PIN')
   }
 
   // ── PIN step ─────────────────────────────────────────────────────────────────
@@ -132,7 +148,10 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
     const userId  = trimmed.toLowerCase().replace(/\s+/g, '_')
     try {
       await setDoc(doc(db, 'users', userId), {
-        name: trimmed, pin, isAdmin: userId === 'iain', createdAt: Date.now(),
+        name: trimmed,                     // what they're called in the app
+        firstName: firstName.trim(),       // real identity — visible in Admin
+        surname:   surname.trim(),
+        pin, isAdmin: userId === 'iain', createdAt: Date.now(),
       })
       const s: UserSession = {
         name: trimmed, userId, isAdmin: userId === 'iain', expiry: Date.now() + SESSION_MS,
@@ -218,11 +237,11 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
       {screen === 'enter_name' && (
         <div style={{ width: '100%', maxWidth: 340, padding: '28px 20px 0' }}>
           <p style={{ margin: '0 0 18px', fontSize: 15, color: '#8e8e93', textAlign: 'center' }}>
-            What's your name?
+            What should we call you?
           </p>
           <input
             type="text"
-            placeholder="Enter your name"
+            placeholder="Your name or nickname"
             value={name}
             onChange={e => { setName(e.target.value); setNameError('') }}
             onKeyDown={e => e.key === 'Enter' && handleNameSubmit()}
@@ -249,6 +268,65 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
           >
             {nameBusy ? 'Checking…' : 'Continue →'}
           </button>
+        </div>
+      )}
+
+      {/* ── First-time details screen ─────────────────────────────────────── */}
+      {screen === 'enter_details' && (
+        <div style={{ width: '100%', maxWidth: 340, padding: '28px 20px 0' }}>
+          <p style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 600, color: '#1c1c1e', textAlign: 'center' }}>
+            Nice to meet you, {name.trim()}!
+          </p>
+          <p style={{ margin: '0 0 18px', fontSize: 14, color: '#8e8e93', textAlign: 'center' }}>
+            What&apos;s your full name?
+          </p>
+          <input
+            type="text"
+            placeholder="First name"
+            value={firstName}
+            onChange={e => { setFirstName(e.target.value); setDetailsError('') }}
+            autoFocus
+            style={{
+              width: '100%', padding: '14px 16px', fontSize: 17, borderRadius: 14,
+              border: `1.5px solid ${detailsError && !firstName.trim() ? '#ff3b30' : '#c7c7cc'}`,
+              background: 'white', outline: 'none', boxSizing: 'border-box',
+              boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
+            }}
+          />
+          <input
+            type="text"
+            placeholder="Surname"
+            value={surname}
+            onChange={e => { setSurname(e.target.value); setDetailsError('') }}
+            onKeyDown={e => e.key === 'Enter' && handleDetailsSubmit()}
+            style={{
+              marginTop: 10,
+              width: '100%', padding: '14px 16px', fontSize: 17, borderRadius: 14,
+              border: `1.5px solid ${detailsError && !surname.trim() ? '#ff3b30' : '#c7c7cc'}`,
+              background: 'white', outline: 'none', boxSizing: 'border-box',
+              boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
+            }}
+          />
+          {detailsError && (
+            <p style={{ margin: '8px 0 0', fontSize: 13, color: '#ff3b30' }}>{detailsError}</p>
+          )}
+          <button
+            onClick={handleDetailsSubmit}
+            disabled={!firstName.trim() || !surname.trim()}
+            style={{
+              marginTop: 14, width: '100%', padding: 16, fontSize: 17, fontWeight: 700,
+              borderRadius: 14, border: 'none', background: '#1c1c1e', color: 'white',
+              cursor: !firstName.trim() || !surname.trim() ? 'not-allowed' : 'pointer',
+              opacity: !firstName.trim() || !surname.trim() ? 0.4 : 1, transition: 'opacity 0.2s',
+            }}
+          >
+            Continue →
+          </button>
+          <button
+            onClick={() => { setScreen('enter_name'); setDetailsError('') }}
+            style={{ marginTop: 16, width: '100%', fontSize: 14, color: '#8e8e93',
+                     background: 'transparent', border: 'none', cursor: 'pointer' }}
+          >← Back</button>
         </div>
       )}
 

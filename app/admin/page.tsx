@@ -6,7 +6,10 @@ import { db } from '@/lib/firebase'
 import { getSession } from '../components/PasscodeGate'
 import Link from 'next/link'
 
-interface PSUser { userId: string; name: string; pin: string; isAdmin: boolean; createdAt: number }
+interface PSUser {
+  userId: string; name: string; pin: string; isAdmin: boolean; createdAt: number
+  firstName?: string; surname?: string
+}
 
 export default function AdminPage() {
   const [authorized, setAuthorized] = useState<boolean | null>(null)
@@ -77,6 +80,11 @@ export default function AdminPage() {
                     {user.name}
                     {user.isAdmin && <span className="ml-2 text-xs font-semibold bg-yellow-100 text-yellow-800 px-2 py-0.5 rounded-full">Admin</span>}
                   </p>
+                  {(user.firstName || user.surname) && (
+                    <p className="text-sm text-brand-900/60 mt-0.5 font-medium">
+                      {[user.firstName, user.surname].filter(Boolean).join(' ')}
+                    </p>
+                  )}
                   <p className="text-xs text-brand-900/40 mt-0.5">
                     Joined {new Date(user.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
                   </p>
