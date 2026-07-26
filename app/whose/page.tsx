@@ -11,6 +11,7 @@ import type { PSSet, ChecklistLine } from '@/lib/types'
 import { matchSingle, type BKCandidate, type SingleResult } from '@/lib/matching'
 import { dominantColour, foregroundFraction, frameSignature, signatureDiff } from '@/lib/colour'
 import Link from 'next/link'
+import { useAuth } from '../components/PasscodeGate'
 
 const SCAN_TICK_MS   = 650
 const COOLDOWN_MS    = 2200
@@ -30,12 +31,15 @@ interface SetHit {
 interface ScanOutcome {
   partNum: string | null
   displayName: string
-  hits: SetHit[]              // ranked: needed → have_enough → wrong_color
-  added: string | null        // setNum credited (one at a time)
+  hits: SetHit[]
+  added: string | null
   addedLineId?: string
 }
 
 export default function WhoseBrickPage() {
+  const session  = useAuth()
+  const userId   = session?.userId ?? ''
+
   const videoRef     = useRef<HTMLVideoElement>(null)
   const streamRef    = useRef<MediaStream | null>(null)
   const busyRef      = useRef(false)
@@ -51,15 +55,16 @@ export default function WhoseBrickPage() {
   const [identifying, setIdentifying] = useState(false)
   const [outcome, setOutcome]         = useState<ScanOutcome | null>(null)
 
-  // Load every set + checklist once
+  // Load every set + checklist for this user once
   useEffect(() => {
+    if (!userId) return
     let cancelled = false
     async function load() {
-      const setsSnap = await getDocs(collection(db, 'sets'))
+      const setsSnap = await getDocs(collection(db, 'users', userId, 'sets'))
       const sets = setsSnap.docs.map(d => ({ setNum: d.id, ...d.data() } as PSSet))
       const data: SetData[] = []
       await Promise.all(sets.map(async s => {
-        const cl = await getDocs(collection(db, 'sets', s.setNum, 'checklist'))
+        const cl = await getDocs(collection(db, 'users', userId, 'sets', s.setNum, 'checklist'))
         if (cl.size > 0) {
           data.push({ set: s, checklist: cl.docs.map(d => d.data() as ChecklistLine) })
         }
@@ -72,9 +77,9 @@ export default function WhoseBrickPage() {
     }
     load()
     return () => { cancelled = true }
-  }, [])
+  }, [userId])
 
-  // Camera + scan loop (same gating as the Single Brick scanner)
+  // Camera + scan loop
   useEffect(() => {
     let cancelled = false
     let timer: ReturnType<typeof setInterval> | null = null
@@ -183,11 +188,10 @@ export default function WhoseBrickPage() {
   }, [])
 
   async function addToSet(hit: SetHit) {
-    if (!outcome || outcome.added || !hit.res.line) return
-    await updateDoc(doc(db, 'sets', hit.setNum, 'checklist', hit.res.line.lineId), {
+    if (!outcome || outcome.added || !hit.res.line || !userId) return
+    await updateDoc(doc(db, 'users', userId, 'sets', hit.setNum, 'checklist', hit.res.line.lineId), {
       quantityFound: increment(1),
     })
-    // keep local copy in sync so repeat scans see updated counts
     const sd = setsRef.current.find(s => s.set.setNum === hit.setNum)
     const line = sd?.checklist.find(l => l.lineId === hit.res.line!.lineId)
     if (line) line.quantityFound += 1
@@ -195,10 +199,10 @@ export default function WhoseBrickPage() {
   }
 
   async function undoAdd() {
-    if (!outcome?.added || !outcome.addedLineId) return
+    if (!outcome?.added || !outcome.addedLineId || !userId) return
     const sd = setsRef.current.find(s => s.set.setNum === outcome.added)
     const line = sd?.checklist.find(l => l.lineId === outcome.addedLineId)
-    await updateDoc(doc(db, 'sets', outcome.added, 'checklist', outcome.addedLineId), {
+    await updateDoc(doc(db, 'users', userId, 'sets', outcome.added, 'checklist', outcome.addedLineId), {
       quantityFound: Math.max(0, (line?.quantityFound ?? 1) - 1),
     })
     if (line) line.quantityFound = Math.max(0, line.quantityFound - 1)
@@ -344,7 +348,7 @@ export default function WhoseBrickPage() {
 
           <p className="text-xs text-brand-900/40 text-center px-4">
             Scans every brick against all {setCount} of your sets.
-            Tap “+ Add here” to credit the right set.
+            Tap "+ Add here" to credit the right set.
           </p>
         </>
       )}

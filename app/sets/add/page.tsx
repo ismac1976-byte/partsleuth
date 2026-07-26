@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { doc, setDoc, serverTimestamp } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
 import Link from 'next/link'
+import { useAuth } from '../../components/PasscodeGate'
 
 interface SetResult {
   set_num: string
@@ -23,7 +24,10 @@ const SEARCH_TIPS = [
 ]
 
 export default function AddSetPage() {
-  const router = useRouter()
+  const router  = useRouter()
+  const session = useAuth()
+  const userId  = session?.userId ?? ''
+
   const inputRef = useRef<HTMLInputElement>(null)
   const [query, setQuery]       = useState('')
   const [results, setResults]   = useState<SetResult[]>([])
@@ -54,9 +58,10 @@ export default function AddSetPage() {
   }, [query])
 
   const addSet = async (set: SetResult) => {
+    if (!userId) return
     setAdding(set.set_num)
     try {
-      await setDoc(doc(db, 'sets', set.set_num), {
+      await setDoc(doc(db, 'users', userId, 'sets', set.set_num), {
         name:       set.name,
         year:       set.year,
         totalParts: set.num_parts,

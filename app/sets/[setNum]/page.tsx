@@ -6,6 +6,7 @@ import { db } from '@/lib/firebase'
 import { useParams } from 'next/navigation'
 import type { PSSet, ChecklistLine } from '@/lib/types'
 import Link from 'next/link'
+import { useAuth } from '../../components/PasscodeGate'
 
 // Map snake_case API response → camelCase ChecklistLine for Firestore
 function apiPartToLine(p: Record<string, any>): ChecklistLine {
@@ -27,6 +28,8 @@ function apiPartToLine(p: Record<string, any>): ChecklistLine {
 
 export default function SetDetailPage() {
   const { setNum } = useParams<{ setNum: string }>()
+  const session    = useAuth()
+  const userId     = session?.userId ?? ''
 
   const [set, setSet]             = useState<PSSet | null>(null)
   const [checklist, setChecklist] = useState<ChecklistLine[]>([])
@@ -37,21 +40,24 @@ export default function SetDetailPage() {
 
   // Subscribe to the set document
   useEffect(() => {
-    return onSnapshot(doc(db, 'sets', setNum), snap => {
+    if (!userId) return
+    return onSnapshot(doc(db, 'users', userId, 'sets', setNum), snap => {
       if (snap.exists()) setSet({ setNum: snap.id, ...snap.data() } as PSSet)
       setSetLoad(false)
     })
-  }, [setNum])
+  }, [setNum, userId])
 
   // Subscribe to checklist subcollection
   useEffect(() => {
-    return onSnapshot(collection(db, 'sets', setNum, 'checklist'), snap => {
+    if (!userId) return
+    return onSnapshot(collection(db, 'users', userId, 'sets', setNum, 'checklist'), snap => {
       setChecklist(snap.docs.map(d => d.data() as ChecklistLine))
     })
-  }, [setNum])
+  }, [setNum, userId])
 
   // Fetch all parts pages from Rebrickable and batch-write to Firestore
   const loadParts = useCallback(async () => {
+    if (!userId) return
     setLoadingParts(true)
     try {
       let page = 1
@@ -74,7 +80,7 @@ export default function SetDetailPage() {
           const chunk = lines.slice(i, i + 400)
           const batch = writeBatch(db)
           for (const line of chunk) {
-            batch.set(doc(db, 'sets', setNum, 'checklist', line.lineId), line)
+            batch.set(doc(db, 'users', userId, 'sets', setNum, 'checklist', line.lineId), line)
           }
           await batch.commit()
           loaded += chunk.length
@@ -85,40 +91,38 @@ export default function SetDetailPage() {
         page++
       }
       // Mark the set as having parts loaded (for homepage card)
-      await updateDoc(doc(db, 'sets', setNum), { partsLoaded: true })
+      await updateDoc(doc(db, 'users', userId, 'sets', setNum), { partsLoaded: true })
     } catch (e) {
       console.error('loadParts error:', e)
     } finally {
       setLoadingParts(false)
       setLoadMsg('')
     }
-  }, [setNum])
+  }, [setNum, userId])
 
   async function tickOne(lineId: string) {
-    if (ticking) return
+    if (ticking || !userId) return
     setTicking(lineId)
     try {
-      await updateDoc(doc(db, 'sets', setNum, 'checklist', lineId), { quantityFound: increment(1) })
+      await updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', lineId), { quantityFound: increment(1) })
     } finally { setTicking(null) }
   }
 
   async function tickAll(line: ChecklistLine) {
-    if (ticking) return
+    if (ticking || !userId) return
     const still = line.quantityNeeded - line.quantityFound
     if (still <= 0) return
     setTicking(line.lineId)
     try {
-      await updateDoc(doc(db, 'sets', setNum, 'checklist', line.lineId), { quantityFound: increment(still) })
+      await updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', line.lineId), { quantityFound: increment(still) })
     } finally { setTicking(null) }
   }
 
   async function untickOne(line: ChecklistLine) {
-    if (ticking || line.quantityFound <= 0) return
+    if (ticking || line.quantityFound <= 0 || !userId) return
     setTicking(line.lineId)
     try {
-      // Absolute clamped write (not increment): rapid taps can never push
-      // the count below zero or leave a stale remainder.
-      await updateDoc(doc(db, 'sets', setNum, 'checklist', line.lineId),
+      await updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', line.lineId),
         { quantityFound: Math.max(0, line.quantityFound - 1) })
     } finally { setTicking(null) }
   }
@@ -131,7 +135,6 @@ export default function SetDetailPage() {
     .filter(l => l.quantityFound < l.quantityNeeded)
     .sort((a, b) => b.quantityNeeded - a.quantityNeeded)
 
-  // Official LEGO instructions — our API finds the PDF and redirects straight to it
   const instructionsUrl = `/api/instructions?set=${setNum.split('-')[0]}`
 
   if (isSetLoading) {
@@ -155,7 +158,6 @@ export default function SetDetailPage() {
       {/* Set summary card */}
       <div className="card space-y-4">
         <div className="flex gap-4 items-start">
-          {/* Image */}
           <div className="w-24 h-24 flex-shrink-0 rounded-xl bg-gray-50
                           flex items-center justify-center overflow-hidden border border-gray-100">
             {set.imageUrl
@@ -164,8 +166,6 @@ export default function SetDetailPage() {
               : <span className="text-3xl">🧱</span>
             }
           </div>
-
-          {/* Title + meta */}
           <div className="flex-1 min-w-0">
             <h1 className="text-lg font-black text-brand-900 leading-tight">{set.name}</h1>
             <p className="text-sm text-brand-900/40 mt-1 font-medium">
@@ -174,7 +174,6 @@ export default function SetDetailPage() {
           </div>
         </div>
 
-        {/* Progress (shown once checklist is loaded) */}
         {checklist.length > 0 && (
           <div className="space-y-2">
             <div className="flex items-center justify-between">
@@ -190,7 +189,7 @@ export default function SetDetailPage() {
         )}
       </div>
 
-      {/* Actions — classic layout: one big red Scan button + Missing beside it */}
+      {/* Actions */}
       {checklist.length > 0 ? (
         <div className="space-y-3">
           <div className="flex gap-3">
@@ -247,7 +246,7 @@ export default function SetDetailPage() {
         </div>
       )}
 
-      {/* Set complete 🎉 */}
+      {/* Set complete */}
       {checklist.length > 0 && stillNeeded.length === 0 && (
         <div className="card text-center py-12 space-y-3">
           <p className="text-6xl">🎉</p>

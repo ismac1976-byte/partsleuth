@@ -9,20 +9,24 @@ import { db } from '@/lib/firebase'
 import { useParams } from 'next/navigation'
 import type { ChecklistLine } from '@/lib/types'
 import Link from 'next/link'
+import { useAuth } from '../../../components/PasscodeGate'
 
 export default function FoundPage() {
   const { setNum } = useParams<{ setNum: string }>()
+  const session    = useAuth()
+  const userId     = session?.userId ?? ''
 
   const [checklist, setChecklist] = useState<ChecklistLine[]>([])
   const [loading, setLoading]     = useState(true)
   const [ticking, setTicking]     = useState<string | null>(null)
 
   useEffect(() => {
-    return onSnapshot(collection(db, 'sets', setNum, 'checklist'), snap => {
+    if (!userId) return
+    return onSnapshot(collection(db, 'users', userId, 'sets', setNum, 'checklist'), snap => {
       setChecklist(snap.docs.map(d => d.data() as ChecklistLine))
       setLoading(false)
     })
-  }, [setNum])
+  }, [setNum, userId])
 
   const found = checklist
     .filter(l => !l.isSpare && l.quantityFound > 0)
@@ -30,33 +34,31 @@ export default function FoundPage() {
 
   const totalFound = found.reduce((s, l) => s + Math.min(l.quantityFound, l.quantityNeeded), 0)
 
-  // ✕ = undo this entry completely — removes it from the Found list
   async function clearLine(line: ChecklistLine) {
-    if (ticking || line.quantityFound <= 0) return
+    if (ticking || line.quantityFound <= 0 || !userId) return
     setTicking(line.lineId)
     try {
-      await updateDoc(doc(db, 'sets', setNum, 'checklist', line.lineId), {
+      await updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', line.lineId), {
         quantityFound: 0,
       })
     } finally { setTicking(null) }
   }
 
-  // − = remove just one (absolute clamped write — can never go below zero)
   async function removeOne(line: ChecklistLine) {
-    if (ticking || line.quantityFound <= 0) return
+    if (ticking || line.quantityFound <= 0 || !userId) return
     setTicking(line.lineId)
     try {
-      await updateDoc(doc(db, 'sets', setNum, 'checklist', line.lineId), {
+      await updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', line.lineId), {
         quantityFound: Math.max(0, line.quantityFound - 1),
       })
     } finally { setTicking(null) }
   }
 
   async function addOne(line: ChecklistLine) {
-    if (ticking) return
+    if (ticking || !userId) return
     setTicking(line.lineId)
     try {
-      await updateDoc(doc(db, 'sets', setNum, 'checklist', line.lineId), {
+      await updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', line.lineId), {
         quantityFound: increment(1),
       })
     } finally { setTicking(null) }

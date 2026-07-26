@@ -23,6 +23,7 @@ import {
 import { segmentBricks, type SegmentResult } from '@/lib/segment'
 import { dominantColour, foregroundFraction, frameSignature, signatureDiff } from '@/lib/colour'
 import Link from 'next/link'
+import { useAuth } from '../../../components/PasscodeGate'
 
 type ScanState = 'idle' | 'processing' | 'result' | 'error'
 type InputMode = 'single' | 'photo'
@@ -70,6 +71,9 @@ export default function ScanPage() {
   const initialMode: InputMode = modeParam === 'photo' ? 'photo' : 'single'
   const [inputMode] = useState<InputMode>(initialMode)
 
+  const session  = useAuth()
+  const userId   = session?.userId ?? ''
+
   const fileRef = useRef<HTMLInputElement>(null)
 
   const [checklist, setChecklist] = useState<ChecklistLine[]>([])
@@ -81,10 +85,11 @@ export default function ScanPage() {
 
   // Live checklist subscription
   useEffect(() => {
-    return onSnapshot(collection(db, 'sets', setNum, 'checklist'), snap => {
+    if (!userId) return
+    return onSnapshot(collection(db, 'users', userId, 'sets', setNum, 'checklist'), snap => {
       setChecklist(snap.docs.map(d => d.data() as ChecklistLine))
     })
-  }, [setNum])
+  }, [setNum, userId])
 
   // Elapsed-seconds ticker while scanning
   useEffect(() => {
@@ -96,9 +101,6 @@ export default function ScanPage() {
 
   // ── Scan logic ──
 
-  // FREE pile identification: Brickognize part numbers + pixel colour vs
-  // checklist RGB. Zero token cost. Validated 20/20 part & colour on fresh
-  // sets before rollout. Quantity-aware across duplicate pieces in one scan.
   function buildFreeDetections(
     seg: SegmentResult,
     candidatesByIndex: Map<number, BKCandidate[]>,
@@ -159,7 +161,6 @@ export default function ScanPage() {
       let detections: Detection[]
 
       if (seg.pieces.length > 0) {
-        // Claude-with-catalog for a subset of crops (the paid path)
         const claudeDetections = async (indices: number[]): Promise<Map<number, Detection>> => {
           const data = await post({
             crops:   indices.map(i => seg.pieces[i].cropB64),
@@ -181,7 +182,6 @@ export default function ScanPage() {
         }
 
         try {
-          // Step 1: FREE recogniser for every crop (no tokens, no limit)
           const data = await post({ crops_free: seg.pieces.map(p => p.cropB64) })
           const byIndex = new Map<number, BKCandidate[]>()
           for (const r of (data.results ?? [])) byIndex.set(r.i, r.candidates ?? [])
@@ -189,9 +189,6 @@ export default function ScanPage() {
           if (!anyHit) throw new Error('recogniser returned nothing')
           detections = buildFreeDetections(seg, byIndex)
 
-          // Step 2: crops the free recogniser was UNSURE about go to Claude.
-          // Real-world photos (small, warm-lit crops) need this; studio-crisp
-          // crops don't — so cost scales with difficulty, often zero.
           const weak = detections
             .map((d, i) => ({ d, i }))
             .filter(({ d }) =>
@@ -209,12 +206,10 @@ export default function ScanPage() {
             }
           }
         } catch {
-          // Free recogniser completely unavailable → full Claude fallback
           detections = Array.from(
             (await claudeDetections(seg.pieces.map((_, i) => i))).values())
         }
       } else {
-        // No pieces detected on-device: whole-image Claude fallback
         const data = await post({ image_b64: seg.display.b64 })
         detections = matchDetections((data.pieces ?? []) as RawPiece[], checklist)
       }
@@ -222,20 +217,20 @@ export default function ScanPage() {
       const scanResult: ScanResult = { detections, summary: summarize(detections) }
       setResult(scanResult)
       setScanState('result')
-      await persistFinds(setNum, detections)
+      await persistFinds(setNum, userId, detections)
 
     } catch (e: any) {
       setErrorMsg(e.message ?? 'Scan failed — please try again')
       setScanState('error')
     }
-  }, [checklist, setNum])
+  }, [checklist, setNum, userId])
 
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (!file) return
     try {
       const seg = await segmentFile(file)
-      runScan(seg)               // auto-scan immediately
+      runScan(seg)
     } catch (err: any) {
       setErrorMsg(err.message ?? 'Could not read that photo')
       setScanState('error')
@@ -249,8 +244,6 @@ export default function ScanPage() {
     setErrorMsg('')
     if (fileRef.current) fileRef.current.value = ''
   }
-
-  // ── Render ──
 
   const isProcessing = scanState === 'processing'
 
@@ -285,8 +278,6 @@ export default function ScanPage() {
         className="hidden"
       />
 
-      {/* Quietly pre-fetch the Sherlock searching clip while idle (165KB),
-          so it plays instantly from cache and never slows a scan */}
       {inputMode === 'photo' && scanState === 'idle' && (
         <video src="/searching.mp4" preload="auto" muted playsInline
                className="hidden" aria-hidden="true" />
@@ -294,7 +285,7 @@ export default function ScanPage() {
 
       {/* ── SINGLE BRICK live scanner ── */}
       {inputMode === 'single' && (
-        <SingleScanner checklist={checklist} setNum={setNum} />
+        <SingleScanner checklist={checklist} setNum={setNum} userId={userId} />
       )}
 
       {/* ── PHOTO PICKER (photo mode, nothing captured yet) ── */}
@@ -313,12 +304,10 @@ export default function ScanPage() {
         </button>
       )}
 
-      {/* ── CAPTURED IMAGE + OVERLAY (both modes: processing & result) ── */}
+      {/* ── CAPTURED IMAGE + OVERLAY ── */}
       {captured && (scanState === 'processing' || scanState === 'result') && (
         <div className="space-y-3">
           <div className="flex justify-center">
-            {/* inline-block wrapper shrink-wraps the image, so the % boxes
-                always line up with the picture — nothing is ever cropped */}
             <div className="relative inline-block rounded-2xl overflow-hidden shadow-md">
               <img
                 src={captured.dataUrl}
@@ -327,16 +316,12 @@ export default function ScanPage() {
                 style={{ maxHeight: '55vh' }}
               />
 
-              {/* Bounding boxes */}
               {scanState === 'result' && result?.detections.map((d, i) => (
                 <BoundingBox key={i} detection={d} index={i} />
               ))}
 
-              {/* Processing scrim */}
               {isProcessing && (
                 <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-4 px-6">
-                  {/* Sherlock searching for clues — 165KB, silent, looping,
-                      preloaded while idle so it never competes with the scan */}
                   <video
                     src="/searching.mp4"
                     autoPlay loop muted playsInline preload="auto"
@@ -480,17 +465,12 @@ export default function ScanPage() {
 }
 
 // ── Single Brick live scanner ────────────────────────────────────────────────
-//
-// Barcode-gun workflow: hold ONE brick in the reticle → identified in ~1s.
-// Brickognize does the part number (no Claude → fast); colour comes from
-// the pixels, matched against the checklist's exact RGB values (95% accurate
-// in validation). Motion-gated: scans when the scene changes then stabilises.
 
 const SCAN_TICK_MS   = 650
 const COOLDOWN_MS    = 2200
-const STABLE_DIFF    = 8     // ≤ this vs previous frame = hand is steady
-const NEW_SCENE_DIFF = 13    // > this vs last scanned frame = new brick
-const MIN_FG         = 0.05  // minimum foreground fraction to bother scanning
+const STABLE_DIFF    = 8
+const NEW_SCENE_DIFF = 13
+const MIN_FG         = 0.05
 
 interface SingleShown {
   res: SingleResult
@@ -500,7 +480,13 @@ interface SingleShown {
   lineId?: string
 }
 
-function SingleScanner({ checklist, setNum }: { checklist: ChecklistLine[]; setNum: string }) {
+function SingleScanner({
+  checklist, setNum, userId,
+}: {
+  checklist: ChecklistLine[]
+  setNum: string
+  userId: string
+}) {
   const videoRef     = useRef<HTMLVideoElement>(null)
   const streamRef    = useRef<MediaStream | null>(null)
   const busyRef      = useRef(false)
@@ -580,9 +566,9 @@ function SingleScanner({ checklist, setNum }: { checklist: ChecklistLine[]; setN
         const res = matchSingle(candidates, rgb, checklistRef.current)
 
         let ticked = false
-        if (res.status === 'needed' && res.line) {
+        if (res.status === 'needed' && res.line && userId) {
           ticked = true
-          await updateDoc(doc(db, 'sets', setNum, 'checklist', res.line.lineId), {
+          await updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', res.line.lineId), {
             quantityFound: increment(1),
           })
         }
@@ -617,12 +603,12 @@ function SingleScanner({ checklist, setNum }: { checklist: ChecklistLine[]; setN
       if (timer) clearInterval(timer)
       streamRef.current?.getTracks().forEach(t => t.stop())
     }
-  }, [setNum])
+  }, [setNum, userId])
 
   async function undoTick() {
-    if (!shown?.ticked || !shown.lineId) return
+    if (!shown?.ticked || !shown.lineId || !userId) return
     const line = checklistRef.current.find(l => l.lineId === shown.lineId)
-    await updateDoc(doc(db, 'sets', setNum, 'checklist', shown.lineId), {
+    await updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', shown.lineId), {
       quantityFound: Math.max(0, (line?.quantityFound ?? 1) - 1),
     })
     setShown({ ...shown, ticked: false })
@@ -647,8 +633,6 @@ function SingleScanner({ checklist, setNum }: { checklist: ChecklistLine[]; setN
           </div>
         ) : (
           <>
-            {/* Reticle — mirrors the exact region that gets scanned.
-                Tap = scan right now (manual override of the motion gating). */}
             <button
               onClick={() => forceScanRef.current?.()}
               aria-label="Scan now"
@@ -723,7 +707,6 @@ function SingleScanner({ checklist, setNum }: { checklist: ChecklistLine[]; setN
 
 // ── Sub-components ───────────────────────────────────────────────────────────
 
-/** %-positioned bounding box — aligned with the image by construction. */
 function BoundingBox({ detection: d, index }: { detection: Detection; index: number }) {
   const [x1, y1, x2, y2] = d.bboxPct
   const w = x2 - x1, h = y2 - y1
@@ -768,11 +751,10 @@ function StatCard({
 
 // ── Firestore persistence ────────────────────────────────────────────────────
 
-async function persistFinds(setNum: string, detections: Detection[]) {
+async function persistFinds(setNum: string, userId: string, detections: Detection[]) {
+  if (!userId) return
   const counts: Record<string, number> = {}
   for (const det of detections) {
-    // Only auto-tick confident identifications — low-confidence guesses
-    // stay visible in the results but never corrupt the checklist.
     if (det.confidence === 'low' || det.confidence === 'none') continue
     if (det.status === 'needed' && det.checklistMatches.length > 0) {
       const lineId = det.checklistMatches[0].lineId
@@ -783,7 +765,7 @@ async function persistFinds(setNum: string, detections: Detection[]) {
 
   await Promise.all(
     Object.entries(counts).map(([lineId, count]) =>
-      updateDoc(doc(db, 'sets', setNum, 'checklist', lineId), {
+      updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', lineId), {
         quantityFound: increment(count),
       })
     )

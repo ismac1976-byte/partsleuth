@@ -6,11 +6,14 @@ import { db } from '@/lib/firebase'
 import { useParams } from 'next/navigation'
 import type { ChecklistLine } from '@/lib/types'
 import Link from 'next/link'
+import { useAuth } from '../../../components/PasscodeGate'
 
 type SortMode = 'quantity' | 'name' | 'color'
 
 export default function MissingPage() {
   const { setNum } = useParams<{ setNum: string }>()
+  const session    = useAuth()
+  const userId     = session?.userId ?? ''
 
   const [checklist, setChecklist] = useState<ChecklistLine[]>([])
   const [loading, setLoading]     = useState(true)
@@ -18,11 +21,12 @@ export default function MissingPage() {
   const [ticking, setTicking]     = useState<string | null>(null)
 
   useEffect(() => {
-    return onSnapshot(collection(db, 'sets', setNum, 'checklist'), snap => {
+    if (!userId) return
+    return onSnapshot(collection(db, 'users', userId, 'sets', setNum, 'checklist'), snap => {
       setChecklist(snap.docs.map(d => d.data() as ChecklistLine))
       setLoading(false)
     })
-  }, [setNum])
+  }, [setNum, userId])
 
   const nonSpares  = checklist.filter(l => !l.isSpare)
   const missing    = nonSpares.filter(l => l.quantityFound < l.quantityNeeded)
@@ -36,12 +40,11 @@ export default function MissingPage() {
     return 0
   })
 
-  // Add 1 to quantityFound
   async function addOne(lineId: string) {
-    if (ticking) return
+    if (ticking || !userId) return
     setTicking(lineId)
     try {
-      await updateDoc(doc(db, 'sets', setNum, 'checklist', lineId), {
+      await updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', lineId), {
         quantityFound: increment(1),
       })
     } finally {
@@ -49,13 +52,11 @@ export default function MissingPage() {
     }
   }
 
-  // Remove 1 from quantityFound (undo a mistaken tick).
-  // Absolute clamped write — rapid taps can never go below zero.
   async function removeOne(line: ChecklistLine) {
-    if (ticking || line.quantityFound <= 0) return
+    if (ticking || line.quantityFound <= 0 || !userId) return
     setTicking(line.lineId)
     try {
-      await updateDoc(doc(db, 'sets', setNum, 'checklist', line.lineId), {
+      await updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', line.lineId), {
         quantityFound: Math.max(0, line.quantityFound - 1),
       })
     } finally {
@@ -63,14 +64,13 @@ export default function MissingPage() {
     }
   }
 
-  // Mark all remaining as found
   async function markAllFound(line: ChecklistLine) {
-    if (ticking) return
+    if (ticking || !userId) return
     const still = line.quantityNeeded - line.quantityFound
     if (still <= 0) return
     setTicking(line.lineId)
     try {
-      await updateDoc(doc(db, 'sets', setNum, 'checklist', line.lineId), {
+      await updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', line.lineId), {
         quantityFound: increment(still),
       })
     } finally {
@@ -199,7 +199,6 @@ export default function MissingPage() {
                                      border-t-transparent rounded-full animate-spin flex-shrink-0" />
                   ) : (
                     <div className="flex items-center gap-2 flex-shrink-0">
-                      {/* −1 button — undo a mistaken tick */}
                       {line.quantityFound > 0 && (
                         <button
                           onClick={() => removeOne(line)}
@@ -212,7 +211,6 @@ export default function MissingPage() {
                           ✕
                         </button>
                       )}
-                      {/* +1 button — add one at a time */}
                       <button
                         onClick={() => addOne(line.lineId)}
                         className="w-9 h-9 rounded-full border-2 border-gray-200
@@ -224,7 +222,6 @@ export default function MissingPage() {
                       >
                         +
                       </button>
-                      {/* Mark all found */}
                       <button
                         onClick={() => markAllFound(line)}
                         className="w-9 h-9 rounded-full bg-green-500
