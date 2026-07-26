@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from 'next'
 import './globals.css'
 import PasscodeGate from './components/PasscodeGate'
+import IntroSplash from './components/IntroSplash'
 
 export const metadata: Metadata = {
   title: 'PartSleuth',
@@ -45,6 +46,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </div>
         </header>
 
+        <IntroSplash />
         <PasscodeGate>
           {/* pb-20 leaves room for the fixed sign-out/admin bar */}
           <main className="max-w-2xl mx-auto px-4 py-6 pb-20">
