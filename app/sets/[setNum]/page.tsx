@@ -22,7 +22,27 @@ function apiPartToLine(p: Record<string, any>): ChecklistLine {
     quantityNeeded: p.quantity_needed,
     quantityFound:  0,
     isSpare:        p.is_spare ?? false,
+    isMinifig:      false,
     elementId:      p.element_id ?? '',
+  }
+}
+
+// Minifigures / characters come from a separate Rebrickable endpoint
+function apiMinifigToLine(p: Record<string, any>): ChecklistLine {
+  return {
+    lineId:         p.line_id,
+    partNum:        p.part_num,
+    partName:       p.part_name ?? '',
+    partImgUrl:     p.part_img_url ?? '',
+    bricklinkIds:   [],
+    colorId:        -1,
+    colorName:      'Character / Figure',
+    colorRgb:       '',
+    quantityNeeded: p.quantity_needed,
+    quantityFound:  0,
+    isSpare:        false,
+    isMinifig:      true,
+    elementId:      '',
   }
 }
 
@@ -55,7 +75,7 @@ export default function SetDetailPage() {
     })
   }, [setNum, userId])
 
-  // Fetch all parts pages from Rebrickable and batch-write to Firestore
+  // Fetch all parts from Rebrickable (parts + minifigures) and write to Firestore
   const loadParts = useCallback(async () => {
     if (!userId) return
     setLoadingParts(true)
@@ -64,8 +84,9 @@ export default function SetDetailPage() {
       let loaded = 0
       let total = 0
 
+      // ── Step 1: Regular parts (all pages) ────────────────────────────────
       while (true) {
-        setLoadMsg(`Fetching page ${page}…`)
+        setLoadMsg(`Fetching parts page ${page}…`)
         const resp = await fetch(
           `/api/rebrickable?action=parts&set_num=${setNum}&page=${page}&page_size=500`
         )
@@ -90,7 +111,26 @@ export default function SetDetailPage() {
         if (!data.next) break
         page++
       }
-      // Mark the set as having parts loaded (for homepage card)
+
+      // ── Step 2: Minifigures / characters ─────────────────────────────────
+      try {
+        setLoadMsg('Fetching characters & figures…')
+        const mfResp = await fetch(`/api/rebrickable?action=minifigs&set_num=${setNum}`)
+        const mfData = await mfResp.json()
+        const mfLines: ChecklistLine[] = (mfData.results ?? []).map(apiMinifigToLine)
+        if (mfLines.length > 0) {
+          const batch = writeBatch(db)
+          for (const line of mfLines) {
+            batch.set(doc(db, 'users', userId, 'sets', setNum, 'checklist', line.lineId), line)
+          }
+          await batch.commit()
+          setLoadMsg(`Loaded ${mfLines.length} character${mfLines.length !== 1 ? 's' : ''} / figure${mfLines.length !== 1 ? 's' : ''}`)
+        }
+      } catch {
+        // Many sets have no minifigs — silently skip
+      }
+
+      // Mark the set as having parts loaded
       await updateDoc(doc(db, 'users', userId, 'sets', setNum), { partsLoaded: true })
     } catch (e) {
       console.error('loadParts error:', e)
@@ -127,13 +167,19 @@ export default function SetDetailPage() {
     } finally { setTicking(null) }
   }
 
-  // Derived stats
-  const nonSpares  = checklist.filter(l => !l.isSpare)
-  const typesFound = nonSpares.filter(l => l.quantityFound >= l.quantityNeeded).length
-  const pct        = nonSpares.length ? Math.round((typesFound / nonSpares.length) * 100) : 0
+  // Derived stats — count minifigs toward completion too
+  const nonSpares   = checklist.filter(l => !l.isSpare)
+  const typesFound  = nonSpares.filter(l => l.quantityFound >= l.quantityNeeded).length
+  const pct         = nonSpares.length ? Math.round((typesFound / nonSpares.length) * 100) : 0
+
+  // Regular parts first, minifigs at the end
   const stillNeeded = nonSpares
     .filter(l => l.quantityFound < l.quantityNeeded)
-    .sort((a, b) => b.quantityNeeded - a.quantityNeeded)
+    .sort((a, b) => {
+      if (a.isMinifig && !b.isMinifig) return 1
+      if (!a.isMinifig && b.isMinifig) return -1
+      return b.quantityNeeded - a.quantityNeeded
+    })
 
   const instructionsUrl = `/api/instructions?set=${setNum.split('-')[0]}`
 
@@ -239,7 +285,7 @@ export default function SetDetailPage() {
           <div className="card bg-lego-cream border-0 py-4 text-center space-y-1">
             <p className="text-sm font-semibold text-brand-900/60">What does this do?</p>
             <p className="text-xs text-brand-900/40">
-              Downloads the full parts inventory from Rebrickable so you can scan and track pieces.
+              Downloads the full parts inventory from Rebrickable, including characters and figures.
               Only needed once per set.
             </p>
           </div>
@@ -255,7 +301,7 @@ export default function SetDetailPage() {
         </div>
       )}
 
-      {/* Still needed preview */}
+      {/* Still needed preview — bricks first, then characters */}
       {stillNeeded.length > 0 && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
@@ -263,61 +309,62 @@ export default function SetDetailPage() {
             <p className="text-xs font-semibold text-brand-900/40">{stillNeeded.length} types</p>
           </div>
           <div className="space-y-2">
-            {stillNeeded.slice(0, 12).map(line => {
+            {stillNeeded.slice(0, 12).map((line, idx) => {
               const still = line.quantityNeeded - line.quantityFound
               const busy  = ticking === line.lineId
+              // Show divider before first minifig entry
+              const prevIsPart = idx > 0 && !stillNeeded[idx - 1].isMinifig
               return (
-              <div key={line.lineId} className="card flex items-center gap-3 py-3">
-                <div className="w-12 h-12 flex-shrink-0 rounded-lg bg-gray-50
-                                flex items-center justify-center overflow-hidden border border-gray-100">
-                  {line.partImgUrl
-                    ? <img src={line.partImgUrl} alt={line.partNum}
-                           className="w-full h-full object-contain" />
-                    : <span className="text-xs text-brand-900/30">{line.partNum}</span>
-                  }
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold truncate">{line.partName || line.partNum}</p>
-                  <div className="flex items-center gap-1.5 mt-0.5">
-                    {line.colorRgb && (
-                      <span className="w-3 h-3 rounded-sm border border-gray-200 flex-shrink-0"
-                            style={{ backgroundColor: `#${line.colorRgb}` }} />
+                <div key={line.lineId}>
+                  {line.isMinifig && prevIsPart && (
+                    <p className="section-label mt-4 mb-2">Characters &amp; Figures 🧍</p>
+                  )}
+                  <div className="card flex items-center gap-3 py-3">
+                    <div className="w-12 h-12 flex-shrink-0 rounded-lg bg-gray-50
+                                    flex items-center justify-center overflow-hidden border border-gray-100">
+                      {line.partImgUrl
+                        ? <img src={line.partImgUrl} alt={line.partNum}
+                               className="w-full h-full object-contain" />
+                        : <span className="text-xs text-brand-900/30">{line.partNum}</span>
+                      }
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-semibold truncate">{line.partName || line.partNum}</p>
+                      {!line.isMinifig && (
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          {line.colorRgb && (
+                            <span className="w-3 h-3 rounded-sm border border-gray-200 flex-shrink-0"
+                                  style={{ backgroundColor: `#${line.colorRgb}` }} />
+                          )}
+                          <span className="text-xs text-brand-900/40">{line.colorName}</span>
+                        </div>
+                      )}
+                      <p className="text-[11px] text-brand-900/30 mt-0.5">{line.quantityFound}/{line.quantityNeeded} found</p>
+                    </div>
+                    {busy ? (
+                      <span className="inline-block w-5 h-5 border-2 border-brand-500
+                                       border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                    ) : (
+                      <div className="flex items-center gap-1.5 flex-shrink-0">
+                        {line.quantityFound > 0 && (
+                          <button onClick={() => untickOne(line)}
+                                  className="w-8 h-8 rounded-full bg-red-500 flex items-center justify-center
+                                             text-white text-sm font-bold hover:bg-red-600 active:scale-90
+                                             transition-all shadow-sm">✕</button>
+                        )}
+                        <button onClick={() => tickOne(line.lineId)}
+                                className="w-8 h-8 rounded-full border-2 border-gray-200
+                                           flex items-center justify-center text-brand-900/50 text-base font-bold
+                                           hover:border-brand-500 hover:text-brand-500 active:scale-90 transition-all">+</button>
+                        <button onClick={() => tickAll(line)}
+                                className="w-8 h-8 rounded-full bg-green-500 flex items-center justify-center
+                                           text-white text-sm font-bold hover:bg-green-600 active:scale-90
+                                           transition-all shadow-sm"
+                                title={`I have all ${still}`}>✓</button>
+                      </div>
                     )}
-                    <span className="text-xs text-brand-900/40">{line.colorName}</span>
                   </div>
-                  <p className="text-[11px] text-brand-900/30 mt-0.5">{line.quantityFound}/{line.quantityNeeded} found</p>
                 </div>
-                {busy ? (
-                  <span className="inline-block w-5 h-5 border-2 border-brand-500
-                                   border-t-transparent rounded-full animate-spin flex-shrink-0" />
-                ) : (
-                  <div className="flex items-center gap-1.5 flex-shrink-0">
-                    {line.quantityFound > 0 && (
-                      <button
-                        onClick={() => untickOne(line)}
-                        className="w-8 h-8 rounded-full bg-red-500 flex items-center justify-center
-                                   text-white text-sm font-bold hover:bg-red-600 active:scale-90
-                                   transition-all shadow-sm"
-                        title="Remove one — I was wrong"
-                      >✕</button>
-                    )}
-                    <button
-                      onClick={() => tickOne(line.lineId)}
-                      className="w-8 h-8 rounded-full border-2 border-gray-200
-                                 flex items-center justify-center text-brand-900/50 text-base font-bold
-                                 hover:border-brand-500 hover:text-brand-500 active:scale-90 transition-all"
-                      title="I found one"
-                    >+</button>
-                    <button
-                      onClick={() => tickAll(line)}
-                      className="w-8 h-8 rounded-full bg-green-500 flex items-center justify-center
-                                 text-white text-sm font-bold hover:bg-green-600 active:scale-90
-                                 transition-all shadow-sm"
-                      title={`I have all ${still}`}
-                    >✓</button>
-                  </div>
-                )}
-              </div>
               )
             })}
             {stillNeeded.length > 12 && (

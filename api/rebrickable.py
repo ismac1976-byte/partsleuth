@@ -12,6 +12,10 @@ Supported routes (via ?action= query param):
       Returns paginated parts list for a set, formatted for Firestore checklist.
       Each item includes bricklink_ids so the scan API can match against it.
 
+  GET ?action=minifigs&set_num=60197-1
+      Returns characters / minifigures for a set (separate Rebrickable endpoint).
+      LEGO Friends characters, classic minifigures, animals, etc.
+
   GET ?action=search&q=passenger+train
       Searches for sets by name.
 """
@@ -41,8 +45,6 @@ def format_part(item: dict) -> dict:
     color = item["color"]
     bl_ids = part.get("external_ids", {}).get("BrickLink", [])
     return {
-        # Spares get their own doc id — previously a spare line shared its id
-        # with the real entry and could overwrite the true quantity_needed.
         "line_id": (f"{part['part_num']}_{color['id']}_s"
                     if item.get("is_spare") else f"{part['part_num']}_{color['id']}"),
         "part_num": part["part_num"],
@@ -55,7 +57,30 @@ def format_part(item: dict) -> dict:
         "quantity_needed": item["quantity"],
         "quantity_found": 0,
         "is_spare": item.get("is_spare", False),
+        "is_minifig": False,
         "element_id": item.get("element_id", ""),
+    }
+
+
+def format_minifig(item: dict) -> dict:
+    """Normalise a Rebrickable minifig entry for our checklist schema."""
+    fig_num = item.get("set_num", "unknown")
+    # Sanitise fig_num for use as a Firestore document ID
+    safe_id = fig_num.replace("/", "_").replace(".", "_")
+    return {
+        "line_id": f"minifig_{safe_id}",
+        "part_num": fig_num,
+        "part_name": item.get("set_name", fig_num),
+        "part_img_url": item.get("set_img_url", ""),
+        "bricklink_ids": [],
+        "color_id": -1,
+        "color_name": "Character / Figure",
+        "color_rgb": "",
+        "quantity_needed": item.get("quantity", 1),
+        "quantity_found": 0,
+        "is_spare": False,
+        "is_minifig": True,
+        "element_id": "",
     }
 
 
@@ -90,6 +115,23 @@ class handler(BaseHTTPRequestHandler):
                     "results": [format_part(r) for r in data["results"]],
                 })
 
+            elif action == "minifigs":
+                set_num = qs["set_num"][0]
+                # Rebrickable paginates but sets rarely have >100 minifigs
+                all_results = []
+                page = 1
+                while True:
+                    data = rb_get(f"/sets/{set_num}/minifigs/",
+                                  {"page": page, "page_size": 100})
+                    all_results.extend(data.get("results", []))
+                    if not data.get("next"):
+                        break
+                    page += 1
+                self._json(200, {
+                    "count": len(all_results),
+                    "results": [format_minifig(r) for r in all_results],
+                })
+
             elif action == "search":
                 q = qs.get("q", [""])[0]
                 data = rb_get("/sets/", {"search": q, "page_size": 10,
@@ -121,8 +163,6 @@ class handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         if code == 200:
-            # Set metadata and inventories are effectively immutable —
-            # let Vercel's edge cache serve repeats (faster + fewer API calls)
             self.send_header("Cache-Control", "public, s-maxage=86400, max-age=3600")
         self.end_headers()
         self.wfile.write(body)

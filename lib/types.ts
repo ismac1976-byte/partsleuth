@@ -11,7 +11,7 @@ export interface PSSet {
 }
 
 export interface ChecklistLine {
-  lineId: string           // "{partNum}_{colorId}"
+  lineId: string           // "{partNum}_{colorId}" or "minifig_{figNum}"
   partNum: string
   partName: string
   partImgUrl: string
@@ -22,6 +22,7 @@ export interface ChecklistLine {
   quantityNeeded: number
   quantityFound: number
   isSpare: boolean
+  isMinifig: boolean       // true for characters/figures (shown at end of list)
   elementId: string
 }
 

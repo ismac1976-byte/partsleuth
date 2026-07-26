@@ -33,12 +33,16 @@ export default function MissingPage() {
   const foundCount = nonSpares.filter(l => l.quantityFound >= l.quantityNeeded).length
   const pct        = nonSpares.length ? Math.round((foundCount / nonSpares.length) * 100) : 0
 
-  const sorted = [...missing].sort((a, b) => {
-    if (sort === 'quantity') return (b.quantityNeeded - b.quantityFound) - (a.quantityNeeded - a.quantityFound)
-    if (sort === 'name')     return (a.partName || a.partNum).localeCompare(b.partName || b.partNum)
-    if (sort === 'color')    return a.colorName.localeCompare(b.colorName)
-    return 0
-  })
+  // Sort regular parts; minifigs always go after
+  const sortedParts = missing
+    .filter(l => !l.isMinifig)
+    .sort((a, b) => {
+      if (sort === 'quantity') return (b.quantityNeeded - b.quantityFound) - (a.quantityNeeded - a.quantityFound)
+      if (sort === 'name')     return (a.partName || a.partNum).localeCompare(b.partName || b.partNum)
+      if (sort === 'color')    return a.colorName.localeCompare(b.colorName)
+      return 0
+    })
+  const missingFigures = missing.filter(l => l.isMinifig)
 
   async function addOne(lineId: string) {
     if (ticking || !userId) return
@@ -47,9 +51,7 @@ export default function MissingPage() {
       await updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', lineId), {
         quantityFound: increment(1),
       })
-    } finally {
-      setTicking(null)
-    }
+    } finally { setTicking(null) }
   }
 
   async function removeOne(line: ChecklistLine) {
@@ -59,9 +61,7 @@ export default function MissingPage() {
       await updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', line.lineId), {
         quantityFound: Math.max(0, line.quantityFound - 1),
       })
-    } finally {
-      setTicking(null)
-    }
+    } finally { setTicking(null) }
   }
 
   async function markAllFound(line: ChecklistLine) {
@@ -73,9 +73,7 @@ export default function MissingPage() {
       await updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', line.lineId), {
         quantityFound: increment(still),
       })
-    } finally {
-      setTicking(null)
-    }
+    } finally { setTicking(null) }
   }
 
   if (loading) {
@@ -97,7 +95,7 @@ export default function MissingPage() {
         <h1 className="text-2xl font-black text-brand-900">Missing Parts</h1>
       </div>
 
-      {/* Progress summary card */}
+      {/* Progress summary */}
       <div className="card space-y-3">
         <div className="flex items-center justify-between">
           <div>
@@ -121,9 +119,7 @@ export default function MissingPage() {
             <p className="text-2xl font-black text-brand-900">Set Complete!</p>
             <p className="text-sm text-brand-900/50 mt-1">Every part is accounted for</p>
           </div>
-          <Link href={`/sets/${setNum}`} className="btn-primary inline-block px-10 mt-2">
-            Done
-          </Link>
+          <Link href={`/sets/${setNum}`} className="btn-primary inline-block px-10 mt-2">Done</Link>
         </div>
       )}
 
@@ -131,114 +127,102 @@ export default function MissingPage() {
       {missing.length > 0 && (
         <>
           <div className="flex items-center justify-between gap-3">
-            {/* Sort pills */}
             <div className="flex gap-1 bg-white rounded-2xl p-1 border border-gray-100 shadow-sm">
               {(['quantity', 'name', 'color'] as SortMode[]).map(s => (
                 <button
                   key={s}
                   onClick={() => setSort(s)}
                   className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all capitalize
-                    ${sort === s
-                      ? 'bg-brand-500 text-white shadow-sm'
-                      : 'text-brand-900/40 hover:text-brand-900/70'
-                    }`}
-                >
-                  {s}
-                </button>
+                    ${sort === s ? 'bg-brand-500 text-white shadow-sm' : 'text-brand-900/40 hover:text-brand-900/70'}`}
+                >{s}</button>
               ))}
             </div>
-
             <Link href={`/sets/${setNum}/scan`}
                   className="btn-primary text-sm px-4 py-2.5 flex items-center gap-1.5">
               📷 Scan
             </Link>
           </div>
 
-          {/* Missing list */}
-          <div className="space-y-2">
-            {sorted.map(line => {
-              const still = line.quantityNeeded - line.quantityFound
-              const busy  = ticking === line.lineId
-              return (
-                <div
-                  key={line.lineId}
-                  className="card flex items-center gap-3 py-3"
-                >
-                  {/* Part image */}
-                  <div className="w-12 h-12 flex-shrink-0 rounded-lg bg-gray-50
-                                  flex items-center justify-center overflow-hidden border border-gray-100">
-                    {line.partImgUrl
-                      ? <img src={line.partImgUrl} alt={line.partNum}
-                             className="w-full h-full object-contain" />
-                      : <span className="text-[10px] text-brand-900/30 text-center px-1 leading-tight">
-                          {line.partNum}
-                        </span>
-                    }
-                  </div>
+          {/* ── Regular parts ── */}
+          {sortedParts.length > 0 && (
+            <div className="space-y-2">
+              {sortedParts.map(line => <PartRow key={line.lineId} line={line} ticking={ticking} onAdd={addOne} onRemove={removeOne} onMarkAll={markAllFound} />)}
+            </div>
+          )}
 
-                  {/* Part info */}
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-semibold leading-tight truncate">
-                      {line.partName || line.partNum}
-                    </p>
-                    <div className="flex items-center gap-1.5 mt-0.5">
-                      {line.colorRgb && (
-                        <span className="w-3 h-3 rounded-sm border border-gray-200 flex-shrink-0"
-                              style={{ backgroundColor: `#${line.colorRgb}` }} />
-                      )}
-                      <span className="text-xs text-brand-900/40 truncate">{line.colorName}</span>
-                    </div>
-                    <p className="text-[11px] text-brand-900/30 mt-0.5 font-medium">
-                      {line.quantityFound}/{line.quantityNeeded} found
-                    </p>
-                  </div>
-
-                  {/* Action buttons */}
-                  {busy ? (
-                    <span className="inline-block w-5 h-5 border-2 border-brand-500
-                                     border-t-transparent rounded-full animate-spin flex-shrink-0" />
-                  ) : (
-                    <div className="flex items-center gap-2 flex-shrink-0">
-                      {line.quantityFound > 0 && (
-                        <button
-                          onClick={() => removeOne(line)}
-                          className="w-9 h-9 rounded-full bg-red-500
-                                     flex items-center justify-center
-                                     text-white text-base font-bold
-                                     hover:bg-red-600 active:scale-90 transition-all shadow-sm"
-                          title="Remove one — I was wrong"
-                        >
-                          ✕
-                        </button>
-                      )}
-                      <button
-                        onClick={() => addOne(line.lineId)}
-                        className="w-9 h-9 rounded-full border-2 border-gray-200
-                                   flex items-center justify-center
-                                   text-brand-900/50 text-lg font-bold leading-none
-                                   hover:border-brand-500 hover:text-brand-500
-                                   active:scale-90 transition-all"
-                        title="I found one"
-                      >
-                        +
-                      </button>
-                      <button
-                        onClick={() => markAllFound(line)}
-                        className="w-9 h-9 rounded-full bg-green-500
-                                   flex items-center justify-center
-                                   text-white text-base font-bold
-                                   hover:bg-green-600 active:scale-90 transition-all shadow-sm"
-                        title={`I have all ${still}`}
-                      >
-                        ✓
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )
-            })}
-          </div>
+          {/* ── Characters & Figures (always at end) ── */}
+          {missingFigures.length > 0 && (
+            <div className="space-y-3">
+              <p className="section-label mt-2">Characters &amp; Figures 🧍</p>
+              <div className="space-y-2">
+                {missingFigures.map(line => <PartRow key={line.lineId} line={line} ticking={ticking} onAdd={addOne} onRemove={removeOne} onMarkAll={markAllFound} />)}
+              </div>
+            </div>
+          )}
         </>
+      )}
+    </div>
+  )
+}
+
+// ── Shared row component ───────────────────────────────────────────────────
+
+function PartRow({
+  line, ticking, onAdd, onRemove, onMarkAll,
+}: {
+  line: ChecklistLine
+  ticking: string | null
+  onAdd: (id: string) => void
+  onRemove: (line: ChecklistLine) => void
+  onMarkAll: (line: ChecklistLine) => void
+}) {
+  const still = line.quantityNeeded - line.quantityFound
+  const busy  = ticking === line.lineId
+  return (
+    <div className="card flex items-center gap-3 py-3">
+      <div className="w-12 h-12 flex-shrink-0 rounded-lg bg-gray-50
+                      flex items-center justify-center overflow-hidden border border-gray-100">
+        {line.partImgUrl
+          ? <img src={line.partImgUrl} alt={line.partNum} className="w-full h-full object-contain" />
+          : <span className="text-[10px] text-brand-900/30 text-center px-1 leading-tight">{line.partNum}</span>
+        }
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm font-semibold leading-tight truncate">{line.partName || line.partNum}</p>
+        {!line.isMinifig && (
+          <div className="flex items-center gap-1.5 mt-0.5">
+            {line.colorRgb && (
+              <span className="w-3 h-3 rounded-sm border border-gray-200 flex-shrink-0"
+                    style={{ backgroundColor: `#${line.colorRgb}` }} />
+            )}
+            <span className="text-xs text-brand-900/40 truncate">{line.colorName}</span>
+          </div>
+        )}
+        <p className="text-[11px] text-brand-900/30 mt-0.5 font-medium">
+          {line.quantityFound}/{line.quantityNeeded} found
+        </p>
+      </div>
+      {busy ? (
+        <span className="inline-block w-5 h-5 border-2 border-brand-500
+                         border-t-transparent rounded-full animate-spin flex-shrink-0" />
+      ) : (
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {line.quantityFound > 0 && (
+            <button onClick={() => onRemove(line)}
+                    className="w-9 h-9 rounded-full bg-red-500 flex items-center justify-center
+                               text-white text-base font-bold hover:bg-red-600 active:scale-90 transition-all shadow-sm"
+                    title="Remove one — I was wrong">✕</button>
+          )}
+          <button onClick={() => onAdd(line.lineId)}
+                  className="w-9 h-9 rounded-full border-2 border-gray-200
+                             flex items-center justify-center text-brand-900/50 text-lg font-bold leading-none
+                             hover:border-brand-500 hover:text-brand-500 active:scale-90 transition-all"
+                  title="I found one">+</button>
+          <button onClick={() => onMarkAll(line)}
+                  className="w-9 h-9 rounded-full bg-green-500 flex items-center justify-center
+                             text-white text-base font-bold hover:bg-green-600 active:scale-90 transition-all shadow-sm"
+                  title={`I have all ${still}`}>✓</button>
+        </div>
       )}
     </div>
   )
