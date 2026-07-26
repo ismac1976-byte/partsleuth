@@ -285,6 +285,13 @@ export default function ScanPage() {
         className="hidden"
       />
 
+      {/* Quietly pre-fetch the Sherlock searching clip while idle (165KB),
+          so it plays instantly from cache and never slows a scan */}
+      {inputMode === 'photo' && scanState === 'idle' && (
+        <video src="/searching.mp4" preload="auto" muted playsInline
+               className="hidden" aria-hidden="true" />
+      )}
+
       {/* ── SINGLE BRICK live scanner ── */}
       {inputMode === 'single' && (
         <SingleScanner checklist={checklist} setNum={setNum} />
@@ -328,14 +335,20 @@ export default function ScanPage() {
               {/* Processing scrim */}
               {isProcessing && (
                 <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-4 px-6">
-                  <div className="w-16 h-16 border-4 border-lego-yellow border-t-transparent
-                                  rounded-full animate-spin" />
+                  {/* Sherlock searching for clues — 165KB, silent, looping,
+                      preloaded while idle so it never competes with the scan */}
+                  <video
+                    src="/searching.mp4"
+                    autoPlay loop muted playsInline preload="auto"
+                    className="rounded-2xl shadow-lg border-2 border-white/20"
+                    style={{ width: '58%', maxWidth: 320 }}
+                  />
                   <div className="text-center">
                     <p className="text-white font-black text-xl leading-tight">
-                      Identifying bricks…
+                      🔍 Searching for clues…
                     </p>
                     <p className="text-white/70 text-base mt-1">
-                      {elapsed > 0 ? `${elapsed}s — ` : ''}usually 10–15 seconds
+                      {elapsed > 0 ? `${elapsed}s — ` : ''}usually 5–15 seconds
                     </p>
                   </div>
                 </div>
