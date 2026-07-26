@@ -55,7 +55,7 @@ export default function IntroSplash() {
     >
       <video
         ref={videoRef}
-        src="/intro.mp4"
+        src="/intro.mp4?v=2"
         autoPlay
         muted
         playsInline
