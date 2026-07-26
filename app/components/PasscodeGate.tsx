@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, createContext, useContext } from 'react'
-import { doc, getDoc, setDoc } from 'firebase/firestore'
+import { doc, getDoc, setDoc, updateDoc } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
 import Link from 'next/link'
 
@@ -32,12 +32,52 @@ function clearSession() {
   try { localStorage.removeItem(SESSION_KEY) } catch {}
 }
 
-// ── Auth context (readable by any client component) ───────────────────────────
+// ── PIN hashing ───────────────────────────────────────────────────────────────
+// SHA-256 with domain + userId salt — never store or transmit PINs in plaintext.
+// Exported so admin page can hash new PINs before saving them too.
+export async function hashPin(userId: string, pin: string): Promise<string> {
+  const data = new TextEncoder().encode(`partsleuth:${userId}:${pin}`)
+  const buf  = await crypto.subtle.digest('SHA-256', data)
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+// ── Brute-force lockout ────────────────────────────────────────────────────────
+// Stored in localStorage so it survives page refreshes but requires no backend.
+// 5 wrong PINs → 60-second lockout for that userId.
+const LOCKOUT_KEY  = 'ps_lockout'
+const MAX_ATTEMPTS = 5
+const LOCKOUT_MS   = 60_000   // 60 s
+
+interface LockoutData { userId: string; attempts: number; lockedUntil: number | null }
+
+function getLockoutData(userId: string): LockoutData {
+  try {
+    const s: LockoutData = JSON.parse(localStorage.getItem(LOCKOUT_KEY) ?? 'null')
+    if (!s || s.userId !== userId) return { userId, attempts: 0, lockedUntil: null }
+    if (s.lockedUntil && Date.now() > s.lockedUntil) return { userId, attempts: 0, lockedUntil: null }
+    return s
+  } catch { return { userId, attempts: 0, lockedUntil: null } }
+}
+function saveLockoutData(s: LockoutData) {
+  try { localStorage.setItem(LOCKOUT_KEY, JSON.stringify(s)) } catch {}
+}
+function recordFailedAttempt(userId: string): LockoutData {
+  const prev     = getLockoutData(userId)
+  const attempts = prev.attempts + 1
+  const lockedUntil = attempts >= MAX_ATTEMPTS ? Date.now() + LOCKOUT_MS : null
+  const next = { userId, attempts, lockedUntil }
+  saveLockoutData(next); return next
+}
+function clearLockoutData(userId: string) {
+  saveLockoutData({ userId, attempts: 0, lockedUntil: null })
+}
+
+// ── Auth context ──────────────────────────────────────────────────────────────
 export const AuthContext = createContext<UserSession | null>(null)
 export function useAuth() { return useContext(AuthContext) }
 
 // ── Screen type ───────────────────────────────────────────────────────────────
-type Screen = 'loading' | 'enter_name' | 'enter_details' | 'enter_pin_login'
+type Screen = 'loading' | 'choose' | 'enter_name' | 'enter_details' | 'enter_pin_login'
             | 'set_pin' | 'confirm_pin' | 'unlocked'
 
 
@@ -50,7 +90,7 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
   const [nameError, setNameError] = useState('')
   const [nameBusy,  setNameBusy]  = useState(false)
 
-  // first-time details (real identity, shown in Admin)
+  // first-time details
   const [firstName,    setFirstName]    = useState('')
   const [surname,      setSurname]      = useState('')
   const [detailsError, setDetailsError] = useState('')
@@ -62,11 +102,42 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
   const [wrong,    setWrong]    = useState(false)
   const [pinLabel, setPinLabel] = useState('Enter your PIN')
 
+  // Login vs register mode (set by choose screen)
+  const [loginMode, setLoginMode] = useState(true)
+
+  // Brute-force lockout
+  const [lockedUntil,   setLockedUntil]   = useState<number | null>(null)
+  const [lockCountdown, setLockCountdown] = useState(0)
+
   useEffect(() => {
     const s = getSession()
     if (s) { setSession(s); setScreen('unlocked') }
-    else     setScreen('enter_name')
+    else    setScreen('choose')
   }, [])
+
+  // Check for existing lockout when PIN screen appears
+  useEffect(() => {
+    if (screen === 'enter_pin_login') {
+      const userId = name.trim().toLowerCase().replace(/\s+/g, '_')
+      const lock = getLockoutData(userId)
+      if (lock.lockedUntil && Date.now() < lock.lockedUntil) {
+        setLockedUntil(lock.lockedUntil)
+      }
+    }
+  }, [screen, name])
+
+  // Countdown ticker
+  useEffect(() => {
+    if (!lockedUntil) { setLockCountdown(0); return }
+    const tick = () => {
+      const rem = Math.ceil((lockedUntil - Date.now()) / 1000)
+      if (rem <= 0) { setLockedUntil(null); setLockCountdown(0); setPinLabel('Enter your PIN') }
+      else          { setLockCountdown(rem) }
+    }
+    tick()
+    const id = setInterval(tick, 500)
+    return () => clearInterval(id)
+  }, [lockedUntil])
 
   // ── Name step ────────────────────────────────────────────────────────────────
   async function handleNameSubmit() {
@@ -74,13 +145,15 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
     if (!trimmed) { setNameError('Please enter your name'); return }
     setNameBusy(true); setNameError('')
     try {
-      const userId  = trimmed.toLowerCase().replace(/\s+/g, '_')
+      const userId   = trimmed.toLowerCase().replace(/\s+/g, '_')
       const userSnap = await getDoc(doc(db, 'users', userId))
       if (userSnap.exists()) {
         setScreen('enter_pin_login')
         setPinLabel(`Welcome back, ${trimmed.split(' ')[0]}!`)
+      } else if (loginMode) {
+        // Returning-user path: no account found — tell them clearly
+        setNameError(`No account found — check the spelling, or tap Back and choose 'I\'m new here'`)
       } else {
-        // New user — collect their real name first (shown in Admin)
         setScreen('enter_details')
       }
     } catch {
@@ -90,7 +163,7 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
     }
   }
 
-  // ── Details step (first-time users) ──────────────────────────────────────────
+  // ── Details step (first-time) ─────────────────────────────────────────────────
   function handleDetailsSubmit() {
     if (!firstName.trim() || !surname.trim()) {
       setDetailsError('Please fill in both names'); return
@@ -100,15 +173,15 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
     setPinLabel('Choose a 4-digit PIN')
   }
 
-  // ── PIN step ─────────────────────────────────────────────────────────────────
+  // ── PIN step ──────────────────────────────────────────────────────────────────
   function addDigit(d: string) {
-    if (shake) return
+    if (shake || lockedUntil) return   // block during shake and lockout
     const next = digits + d
     if (next.length > 4) return
     setDigits(next)
     if (next.length === 4) handlePinComplete(next)
   }
-  function delDigit() { if (!shake) setDigits(d => d.slice(0, -1)) }
+  function delDigit() { if (!shake && !lockedUntil) setDigits(d => d.slice(0, -1)) }
 
   async function handlePinComplete(pin: string) {
     if (screen === 'enter_pin_login') {
@@ -128,11 +201,55 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
 
   async function doLogin(pin: string) {
     const userId = name.trim().toLowerCase().replace(/\s+/g, '_')
+
+    // Enforce lockout before touching Firestore
+    const lock = getLockoutData(userId)
+    if (lock.lockedUntil && Date.now() < lock.lockedUntil) {
+      triggerShake()
+      setLockedUntil(lock.lockedUntil)
+      return
+    }
+
     try {
       const snap = await getDoc(doc(db, 'users', userId))
-      if (!snap.exists() || snap.data().pin !== pin) {
-        triggerShake(); setPinLabel('Incorrect PIN — try again'); return
+      if (!snap.exists()) {
+        const state = recordFailedAttempt(userId)
+        triggerShake()
+        if (state.lockedUntil) { setLockedUntil(state.lockedUntil) }
+        else {
+          const left = MAX_ATTEMPTS - state.attempts
+          setPinLabel(left > 0 ? `Incorrect PIN — ${left} tr${left === 1 ? 'y' : 'ies'} left` : 'Incorrect PIN')
+        }
+        return
       }
+
+      const stored = snap.data().pin as string
+      const hashed = await hashPin(userId, pin)
+
+      // Accept both hashed (new) and plaintext (legacy) PINs
+      const isHashMatch    = stored === hashed
+      const isLegacyMatch  = stored.length === 4 && stored === pin
+
+      if (!isHashMatch && !isLegacyMatch) {
+        const state = recordFailedAttempt(userId)
+        triggerShake()
+        if (state.lockedUntil) {
+          setLockedUntil(state.lockedUntil)
+        } else {
+          const left = MAX_ATTEMPTS - state.attempts
+          setPinLabel(left > 0 ? `Incorrect PIN — ${left} tr${left === 1 ? 'y' : 'ies'} left` : 'Incorrect PIN')
+        }
+        return
+      }
+
+      // Login succeeded
+      clearLockoutData(userId)
+
+      // Transparently migrate legacy plaintext PIN to hash
+      if (isLegacyMatch) {
+        updateDoc(doc(db, 'users', userId), { pin: hashed }).catch(() => {})
+      }
+
       const s: UserSession = {
         name:    snap.data().name || name.trim(),
         userId,
@@ -147,11 +264,14 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
     const trimmed = name.trim()
     const userId  = trimmed.toLowerCase().replace(/\s+/g, '_')
     try {
+      const hashed = await hashPin(userId, pin)
       await setDoc(doc(db, 'users', userId), {
-        name: trimmed,                     // what they're called in the app
-        firstName: firstName.trim(),       // real identity — visible in Admin
+        name: trimmed,
+        firstName: firstName.trim(),
         surname:   surname.trim(),
-        pin, isAdmin: userId === 'iain', createdAt: Date.now(),
+        pin: hashed,              // store hash, never plaintext
+        isAdmin: userId === 'iain',
+        createdAt: Date.now(),
       })
       const s: UserSession = {
         name: trimmed, userId, isAdmin: userId === 'iain', expiry: Date.now() + SESSION_MS,
@@ -167,7 +287,8 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
 
   function handleSignOut() {
     clearSession(); setSession(null); setName(''); setDigits(''); setFirstPin('')
-    setScreen('enter_name')
+    setLockedUntil(null); setLoginMode(true)
+    setScreen('choose')
   }
 
   // ── Render ────────────────────────────────────────────────────────────────────
@@ -177,7 +298,7 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
     return (
       <AuthContext.Provider value={session}>
         {children}
-        {/* Persistent bottom bar — sign out + admin link */}
+        {/* Persistent bottom bar */}
         <div style={{
           position: 'fixed', bottom: 0, left: 0, right: 0,
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -207,9 +328,10 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
     )
   }
 
-  // ── Auth UI shell ─────────────────────────────────────────────────────────────
+  // ── Auth UI ────────────────────────────────────────────────────────────────────
   const showPin = screen === 'enter_pin_login' || screen === 'set_pin' || screen === 'confirm_pin'
   const keys    = ['1','2','3','4','5','6','7','8','9','','0','⌫']
+  const isLocked = !!lockedUntil && Date.now() < lockedUntil
 
   return (
     <div style={{
@@ -222,22 +344,52 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
 
       {/* Avatar */}
       <div style={{
-        width: 96, height: 96, borderRadius: '50%', overflow: 'hidden',
-        marginBottom: 16, boxShadow: '0 2px 16px rgba(0,0,0,0.15)',
+        width: 192, height: 192, borderRadius: '50%', overflow: 'hidden',
+        marginBottom: 16, boxShadow: '0 4px 24px rgba(0,0,0,0.18)',
+        flexShrink: 0,
       }}>
-        <img src="/avatar.png" alt="PartSleuth"
-             style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+        <video
+          src="/searching.mp4"
+          autoPlay loop muted playsInline
+          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+        />
       </div>
 
       <p style={{ margin: 0, fontSize: 22, fontWeight: 700, color: '#1c1c1e', letterSpacing: '-0.3px' }}>
         PartSleuth
       </p>
 
-      {/* ── Name entry screen ─────────────────────────────────────────────── */}
+      {/* ── Choose: log in or new user ───────────────────────────────────── */}
+      {screen === 'choose' && (
+        <div style={{ width: '100%', maxWidth: 340, padding: '32px 20px 0', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <button
+            onClick={() => { setLoginMode(true); setName(''); setNameError(''); setScreen('enter_name') }}
+            style={{
+              width: '100%', padding: '18px 16px', fontSize: 17, fontWeight: 700,
+              borderRadius: 16, border: 'none', background: '#1c1c1e', color: 'white',
+              cursor: 'pointer', letterSpacing: '-0.2px',
+            }}
+          >
+            Log in
+          </button>
+          <button
+            onClick={() => { setLoginMode(false); setName(''); setNameError(''); setScreen('enter_name') }}
+            style={{
+              width: '100%', padding: '18px 16px', fontSize: 17, fontWeight: 600,
+              borderRadius: 16, border: '1.5px solid #c7c7cc', background: 'white', color: '#1c1c1e',
+              cursor: 'pointer', letterSpacing: '-0.2px',
+            }}
+          >
+            I&apos;m new here
+          </button>
+        </div>
+      )}
+
+      {/* ── Name entry ───────────────────────────────────────────────────── */}
       {screen === 'enter_name' && (
         <div style={{ width: '100%', maxWidth: 340, padding: '28px 20px 0' }}>
           <p style={{ margin: '0 0 18px', fontSize: 15, color: '#8e8e93', textAlign: 'center' }}>
-            What should we call you?
+            {loginMode ? 'What name did you register with?' : 'What should we call you?'}
           </p>
           <input
             type="text"
@@ -268,10 +420,15 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
           >
             {nameBusy ? 'Checking…' : 'Continue →'}
           </button>
+          <button
+            onClick={() => { setName(''); setNameError(''); setScreen('choose') }}
+            style={{ marginTop: 16, width: '100%', fontSize: 14, color: '#8e8e93',
+                     background: 'transparent', border: 'none', cursor: 'pointer' }}
+          >← Back</button>
         </div>
       )}
 
-      {/* ── First-time details screen ─────────────────────────────────────── */}
+      {/* ── First-time details ───────────────────────────────────────────── */}
       {screen === 'enter_details' && (
         <div style={{ width: '100%', maxWidth: 340, padding: '28px 20px 0' }}>
           <p style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 600, color: '#1c1c1e', textAlign: 'center' }}>
@@ -281,11 +438,8 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
             What&apos;s your full name?
           </p>
           <input
-            type="text"
-            placeholder="First name"
-            value={firstName}
+            type="text" placeholder="First name" value={firstName} autoFocus
             onChange={e => { setFirstName(e.target.value); setDetailsError('') }}
-            autoFocus
             style={{
               width: '100%', padding: '14px 16px', fontSize: 17, borderRadius: 14,
               border: `1.5px solid ${detailsError && !firstName.trim() ? '#ff3b30' : '#c7c7cc'}`,
@@ -294,9 +448,7 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
             }}
           />
           <input
-            type="text"
-            placeholder="Surname"
-            value={surname}
+            type="text" placeholder="Surname" value={surname}
             onChange={e => { setSurname(e.target.value); setDetailsError('') }}
             onKeyDown={e => e.key === 'Enter' && handleDetailsSubmit()}
             style={{
@@ -338,11 +490,15 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
               {name.trim().split(' ')[0]}
             </p>
           )}
+
+          {/* Label — shows lockout countdown, wrong PIN message, or normal prompt */}
           <p style={{
-            margin: '4px 0 44px', fontSize: 14,
-            color: wrong ? '#ff3b30' : '#8e8e93', transition: 'color 0.2s',
+            margin: '4px 0 44px', fontSize: 14, transition: 'color 0.2s',
+            color: isLocked ? '#ff9500' : wrong ? '#ff3b30' : '#8e8e93',
           }}>
-            {wrong ? 'Incorrect — try again' : pinLabel}
+            {isLocked
+              ? `🔒 Too many attempts — wait ${lockCountdown}s`
+              : wrong ? 'Incorrect — try again' : pinLabel}
           </p>
 
           {/* Dot indicators */}
@@ -353,17 +509,21 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
             {[0,1,2,3].map(i => (
               <div key={i} style={{
                 width: 16, height: 16, borderRadius: '50%',
-                border: `1.5px solid ${wrong ? '#ff3b30' : '#c7c7cc'}`,
-                background: i < digits.length ? (wrong ? '#ff3b30' : '#1c1c1e') : 'transparent',
+                border: `1.5px solid ${isLocked ? '#ff9500' : wrong ? '#ff3b30' : '#c7c7cc'}`,
+                background: i < digits.length
+                  ? (isLocked ? '#ff9500' : wrong ? '#ff3b30' : '#1c1c1e')
+                  : 'transparent',
                 transition: 'background 0.12s, border-color 0.12s',
               }} />
             ))}
           </div>
 
-          {/* Numpad */}
+          {/* Numpad — disabled during lockout */}
           <div style={{
             display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)',
             gap: 12, width: '100%', maxWidth: 340, padding: '0 20px',
+            opacity: isLocked ? 0.35 : 1,
+            pointerEvents: isLocked ? 'none' : undefined,
           }}>
             {keys.map((k, i) => {
               if (k === '') return <div key={i} />
@@ -391,7 +551,7 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
           </div>
 
           <button
-            onClick={() => { setScreen('enter_name'); setDigits(''); setWrong(false); setShake(false) }}
+            onClick={() => { setScreen('enter_name'); setDigits(''); setWrong(false); setShake(false); setLockedUntil(null) }}
             style={{ marginTop: 28, fontSize: 14, color: '#8e8e93', background: 'transparent', border: 'none', cursor: 'pointer' }}
           >← Back</button>
         </>

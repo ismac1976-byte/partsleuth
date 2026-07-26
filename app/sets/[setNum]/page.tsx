@@ -56,6 +56,7 @@ export default function SetDetailPage() {
   const [isSetLoading, setSetLoad]   = useState(true)
   const [loadingParts, setLoadingParts] = useState(false)
   const [loadMsg, setLoadMsg]     = useState('')
+  const [loadError, setLoadError] = useState('')
   const [ticking, setTicking]     = useState<string | null>(null)
 
   // Subscribe to the set document
@@ -79,6 +80,7 @@ export default function SetDetailPage() {
   const loadParts = useCallback(async () => {
     if (!userId) return
     setLoadingParts(true)
+    setLoadError('')
     try {
       let page = 1
       let loaded = 0
@@ -134,6 +136,7 @@ export default function SetDetailPage() {
       await updateDoc(doc(db, 'users', userId, 'sets', setNum), { partsLoaded: true })
     } catch (e) {
       console.error('loadParts error:', e)
+      setLoadError('Failed to load parts — check your connection and try again')
     } finally {
       setLoadingParts(false)
       setLoadMsg('')
@@ -181,11 +184,14 @@ export default function SetDetailPage() {
       return b.quantityNeeded - a.quantityNeeded
     })
 
-  const instructionsUrl = `/api/instructions?set=${setNum.split('-')[0]}`
+  const instructionsUrl = `/api/instructions?set=${setNum.split('-')[0]}&setNum=${setNum}`
 
   if (isSetLoading) {
     return (
       <div className="space-y-4 pt-2">
+        <Link href="/" className="btn-ghost text-sm inline-flex items-center gap-1 -ml-2">
+          ← Your Sets
+        </Link>
         <div className="card h-32 animate-pulse bg-gray-50" />
         <div className="card h-14 animate-pulse bg-gray-50" />
       </div>
@@ -262,6 +268,24 @@ export default function SetDetailPage() {
              className="btn-secondary w-full text-center text-base py-3 block">
             📖 Building Instructions (PDF)
           </a>
+          <button
+            onClick={loadParts}
+            disabled={loadingParts}
+            className="w-full text-center text-xs text-brand-900/40 py-1 hover:text-brand-500 transition-colors"
+          >
+            {loadingParts
+              ? (loadMsg || 'Reloading parts…')
+              : '↺ Reload parts list'}
+          </button>
+          {loadError && (
+            <div className="card border border-red-200 bg-red-50 py-3 px-4 flex items-center justify-between gap-3">
+              <p className="text-sm text-red-700 flex-1">{loadError}</p>
+              <button onClick={() => { setLoadError(''); loadParts() }}
+                      className="text-sm font-semibold text-red-600 hover:text-red-800 whitespace-nowrap">
+                ↺ Retry
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <div className="space-y-3">
@@ -278,6 +302,15 @@ export default function SetDetailPage() {
               </span>
             ) : '📋  Load Parts List'}
           </button>
+          {loadError && (
+            <div className="card border border-red-200 bg-red-50 py-3 px-4 flex items-center justify-between gap-3">
+              <p className="text-sm text-red-700 flex-1">{loadError}</p>
+              <button onClick={() => { setLoadError(''); loadParts() }}
+                      className="text-sm font-semibold text-red-600 hover:text-red-800 whitespace-nowrap">
+                ↺ Retry
+              </button>
+            </div>
+          )}
           <a href={instructionsUrl} target="_blank" rel="noopener noreferrer"
              className="btn-secondary w-full text-center text-sm py-3 block">
             📖 Building Instructions

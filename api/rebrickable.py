@@ -92,7 +92,9 @@ class handler(BaseHTTPRequestHandler):
 
         try:
             if action == "set":
-                set_num = qs["set_num"][0]
+                set_num = (qs.get("set_num") or [""])[0]
+                if not set_num:
+                    return self._json(400, {"error": "Missing required param: set_num"})
                 data = rb_get(f"/sets/{set_num}/")
                 self._json(200, {
                     "set_num": data["set_num"],
@@ -104,7 +106,9 @@ class handler(BaseHTTPRequestHandler):
                 })
 
             elif action == "parts":
-                set_num = qs["set_num"][0]
+                set_num = (qs.get("set_num") or [""])[0]
+                if not set_num:
+                    return self._json(400, {"error": "Missing required param: set_num"})
                 page = int(qs.get("page", ["1"])[0])
                 page_size = int(qs.get("page_size", ["500"])[0])
                 data = rb_get(f"/sets/{set_num}/parts/",
@@ -116,7 +120,9 @@ class handler(BaseHTTPRequestHandler):
                 })
 
             elif action == "minifigs":
-                set_num = qs["set_num"][0]
+                set_num = (qs.get("set_num") or [""])[0]
+                if not set_num:
+                    return self._json(400, {"error": "Missing required param: set_num"})
                 # Rebrickable paginates but sets rarely have >100 minifigs
                 all_results = []
                 page = 1

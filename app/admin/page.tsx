@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react'
 import { collection, getDocs, doc, getDoc, setDoc, updateDoc, deleteDoc } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
-import { getSession } from '../components/PasscodeGate'
+import { getSession, hashPin } from '../components/PasscodeGate'
 import Link from 'next/link'
 
 interface Usage { date: string; count: number; limit: number; blocked: boolean }
@@ -12,8 +12,9 @@ function todayStr() {
   return new Date().toISOString().slice(0, 10)
 }
 
+// PIN field intentionally omitted — we never display stored hashes
 interface PSUser {
-  userId: string; name: string; pin: string; isAdmin: boolean; createdAt: number
+  userId: string; name: string; isAdmin: boolean; createdAt: number
   firstName?: string; surname?: string
 }
 
@@ -33,9 +34,20 @@ export default function AdminPage() {
   useEffect(() => {
     const s = getSession()
     if (!s || !s.isAdmin) { setAuthorized(false); return }
-    setAuthorized(true)
-    loadUsers()
-    loadUsage()
+
+    // Re-verify admin status from Firestore — don't trust localStorage alone.
+    // This ensures a revoked admin can't keep accessing the page after session refresh.
+    getDoc(doc(db, 'users', s.userId))
+      .then(snap => {
+        if (!snap.exists() || !snap.data().isAdmin) {
+          setAuthorized(false)
+        } else {
+          setAuthorized(true)
+          loadUsers()
+          loadUsage()
+        }
+      })
+      .catch(() => setAuthorized(false))
   }, [])
 
   async function loadUsage() {
@@ -44,11 +56,9 @@ export default function AdminPage() {
     if (!snap.exists()) {
       const fresh: Usage = { date: todayStr(), count: 0, limit: 100, blocked: false }
       await setDoc(ref, fresh)
-      setUsage(fresh); setLimitDraft('100')
-      return
+      setUsage(fresh); setLimitDraft('100'); return
     }
     const u = snap.data() as Usage
-    // display 0 if the stored counter is from a previous day
     const shown = u.date === todayStr() ? u : { ...u, count: 0 }
     setUsage(shown)
     setLimitDraft(String(u.limit ?? 100))
@@ -82,10 +92,12 @@ export default function AdminPage() {
     setLoading(false)
   }
 
+  // Hash the new PIN before saving — same salt scheme as PasscodeGate
   async function handleResetPin(userId: string, newPin: string) {
     if (!/^\d{4}$/.test(newPin)) return
     setBusy(true)
-    await updateDoc(doc(db, 'users', userId), { pin: newPin })
+    const hashed = await hashPin(userId, newPin)
+    await updateDoc(doc(db, 'users', userId), { pin: hashed })
     setResetState(null); setBusy(false)
     await loadUsers()
   }
