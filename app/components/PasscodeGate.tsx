@@ -206,7 +206,7 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
         width: 96, height: 96, borderRadius: '50%', overflow: 'hidden',
         marginBottom: 16, boxShadow: '0 2px 16px rgba(0,0,0,0.15)',
       }}>
-        <img src="/icon-192.png?v=2" alt="PartSleuth"
+        <img src="/avatar.png" alt="PartSleuth"
              style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
       </div>
 

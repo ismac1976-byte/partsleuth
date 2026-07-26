@@ -32,7 +32,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         {/* LEGO-yellow top bar */}
         <header style={{ backgroundColor: '#FFD700' }} className="sticky top-0 z-40">
           <div className="max-w-2xl mx-auto px-4 py-3 flex items-center gap-3">
-            <img src="/icon-192.png?v=2" alt="PartSleuth"
+            <img src="/icon-192.png?v=3" alt="PartSleuth"
                  className="w-9 h-9 rounded-lg object-cover flex-shrink-0" />
             <div className="flex-1">
               <p className="font-black text-brand-900 text-lg leading-none tracking-tight">
