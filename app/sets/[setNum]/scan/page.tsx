@@ -159,32 +159,59 @@ export default function ScanPage() {
       let detections: Detection[]
 
       if (seg.pieces.length > 0) {
+        // Claude-with-catalog for a subset of crops (the paid path)
+        const claudeDetections = async (indices: number[]): Promise<Map<number, Detection>> => {
+          const data = await post({
+            crops:   indices.map(i => seg.pieces[i].cropB64),
+            catalog: buildCatalog(checklist),
+          })
+          const byI = new Map<number, any>()
+          for (const p of (data.pieces ?? [])) byI.set(p.i, p)
+          const pieces: RawPiece[] = indices.map((origIdx, k) => {
+            const p = byI.get(k + 1)
+            return {
+              part_num:   p?.part_num ?? null,
+              color:      p?.color ?? null,
+              confidence: p?.confidence ?? 'none',
+              bbox_pct:   seg.pieces[origIdx].bboxPct,
+            }
+          })
+          const dets = matchDetections(pieces, checklist)
+          return new Map(indices.map((origIdx, k) => [origIdx, dets[k]]))
+        }
+
         try {
-          // Primary: FREE recogniser for every crop (no tokens, no limit)
+          // Step 1: FREE recogniser for every crop (no tokens, no limit)
           const data = await post({ crops_free: seg.pieces.map(p => p.cropB64) })
           const byIndex = new Map<number, BKCandidate[]>()
           for (const r of (data.results ?? [])) byIndex.set(r.i, r.candidates ?? [])
           const anyHit = Array.from(byIndex.values()).some(c => c.length > 0)
           if (!anyHit) throw new Error('recogniser returned nothing')
           detections = buildFreeDetections(seg, byIndex)
-        } catch {
-          // Automatic fallback: Claude path (rate-limited, costs ~0.5p)
-          const data = await post({
-            crops:   seg.pieces.map(p => p.cropB64),
-            catalog: buildCatalog(checklist),
-          })
-          const byIndex = new Map<number, any>()
-          for (const p of (data.pieces ?? [])) byIndex.set(p.i, p)
-          const pieces: RawPiece[] = seg.pieces.map((sp, idx) => {
-            const p = byIndex.get(idx + 1)
-            return {
-              part_num:   p?.part_num ?? null,
-              color:      p?.color ?? null,
-              confidence: p?.confidence ?? 'none',
-              bbox_pct:   sp.bboxPct,
+
+          // Step 2: crops the free recogniser was UNSURE about go to Claude.
+          // Real-world photos (small, warm-lit crops) need this; studio-crisp
+          // crops don't — so cost scales with difficulty, often zero.
+          const weak = detections
+            .map((d, i) => ({ d, i }))
+            .filter(({ d }) =>
+              d.status === 'unknown' ||
+              (d.status === 'not_in_set' && d.confidence !== 'high'))
+            .map(({ i }) => i)
+          if (weak.length > 0) {
+            try {
+              const better = await claudeDetections(weak)
+              for (const [i, det] of Array.from(better.entries())) {
+                if (det) detections[i] = det
+              }
+            } catch {
+              // Claude unavailable / limit reached → keep the free results
             }
-          })
-          detections = matchDetections(pieces, checklist)
+          }
+        } catch {
+          // Free recogniser completely unavailable → full Claude fallback
+          detections = Array.from(
+            (await claudeDetections(seg.pieces.map((_, i) => i))).values())
         }
       } else {
         // No pieces detected on-device: whole-image Claude fallback
