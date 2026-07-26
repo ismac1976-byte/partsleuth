@@ -16,7 +16,6 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
-  // no maximumScale — pinch-zoom stays available (accessibility)
   themeColor: '#FFD700',
 }
 
@@ -47,7 +46,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         </header>
 
         <PasscodeGate>
-          <main className="max-w-2xl mx-auto px-4 py-6 pb-12">
+          {/* pb-20 leaves room for the fixed sign-out/admin bar */}
+          <main className="max-w-2xl mx-auto px-4 py-6 pb-20">
             {children}
           </main>
         </PasscodeGate>
