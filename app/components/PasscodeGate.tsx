@@ -275,7 +275,7 @@ export default function PasscodeGate({ children }: { children: React.ReactNode }
       {screen === 'enter_details' && (
         <div style={{ width: '100%', maxWidth: 340, padding: '28px 20px 0' }}>
           <p style={{ margin: '0 0 4px', fontSize: 16, fontWeight: 600, color: '#1c1c1e', textAlign: 'center' }}>
-            Nice to meet you, {name.trim()}!
+            Nice to meet you
           </p>
           <p style={{ margin: '0 0 18px', fontSize: 14, color: '#8e8e93', textAlign: 'center' }}>
             What&apos;s your full name?
