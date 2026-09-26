@@ -8,31 +8,34 @@ import {
 import { db } from '@/lib/firebase'
 import type { PSSet } from '@/lib/types'
 import Link from 'next/link'
+import { useAuth } from './components/PasscodeGate'
 
 export default function HomePage() {
+  const session = useAuth()
+  const userId  = session?.userId ?? ''
+
   const [sets, setSets] = useState<PSSet[]>([])
   const [loading, setLoading] = useState(true)
-  // setNum of the card awaiting confirm, or null
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
 
   useEffect(() => {
-    const q = query(collection(db, 'sets'), orderBy('addedAt', 'desc'))
+    if (!userId) return
+    const q = query(collection(db, 'users', userId, 'sets'), orderBy('addedAt', 'desc'))
     const unsub = onSnapshot(q, snap => {
       setSets(snap.docs.map(d => ({ setNum: d.id, ...d.data() } as PSSet)))
       setLoading(false)
     })
     return unsub
-  }, [])
+  }, [userId])
 
   async function handleDelete(setNum: string) {
+    if (!userId) return
     setDeleting(setNum)
     try {
-      // Delete all checklist subcollection docs first
-      const clSnap = await getDocs(collection(db, 'sets', setNum, 'checklist'))
+      const clSnap = await getDocs(collection(db, 'users', userId, 'sets', setNum, 'checklist'))
       await Promise.all(clSnap.docs.map(d => deleteDoc(d.ref)))
-      // Delete the set doc itself
-      await deleteDoc(doc(db, 'sets', setNum))
+      await deleteDoc(doc(db, 'users', userId, 'sets', setNum))
     } finally {
       setDeleting(null)
       setConfirmDelete(null)
@@ -91,6 +94,20 @@ export default function HomePage() {
             + Add your first set
           </Link>
         </div>
+      )}
+
+      {/* Whose Brick — global scanner across all sets */}
+      {!loading && sets.length > 0 && (
+        <Link href="/whose"
+              className="flex items-center gap-4 w-full bg-brand-900 text-white
+                         rounded-2xl px-5 py-4 shadow-md active:scale-[0.98] transition-transform">
+          <span className="text-3xl flex-shrink-0">🔍</span>
+          <div className="flex-1 text-left">
+            <p className="font-black text-base leading-tight">Whose Brick Is This?</p>
+            <p className="text-sm text-white/60 mt-0.5">Scan any brick — see which set needs it</p>
+          </div>
+          <span className="text-white/30 text-2xl">›</span>
+        </Link>
       )}
 
       {/* Active sets */}

@@ -1,10 +1,11 @@
 'use client'
 
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
-import { doc, setDoc, serverTimestamp } from 'firebase/firestore'
+import { doc, setDoc, getDoc, getDocs, collection, serverTimestamp } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
 import Link from 'next/link'
+import { useAuth } from '../../components/PasscodeGate'
 
 interface SetResult {
   set_num: string
@@ -23,7 +24,10 @@ const SEARCH_TIPS = [
 ]
 
 export default function AddSetPage() {
-  const router = useRouter()
+  const router  = useRouter()
+  const session = useAuth()
+  const userId  = session?.userId ?? ''
+
   const inputRef = useRef<HTMLInputElement>(null)
   const [query, setQuery]       = useState('')
   const [results, setResults]   = useState<SetResult[]>([])
@@ -31,6 +35,15 @@ export default function AddSetPage() {
   const [adding, setAdding]     = useState<string | null>(null)
   const [error, setError]       = useState('')
   const [searched, setSearched] = useState(false)
+  const [ownedSets, setOwnedSets] = useState<Set<string>>(new Set())
+
+  // Fetch user's existing set IDs so we can badge already-added results
+  useEffect(() => {
+    if (!userId) return
+    getDocs(collection(db, 'users', userId, 'sets'))
+      .then(snap => setOwnedSets(new Set(snap.docs.map(d => d.id))))
+      .catch(() => {})
+  }, [userId])
 
   const search = useCallback(async (q?: string) => {
     const term = (q ?? query).trim()
@@ -54,9 +67,17 @@ export default function AddSetPage() {
   }, [query])
 
   const addSet = async (set: SetResult) => {
+    if (!userId) return
     setAdding(set.set_num)
     try {
-      await setDoc(doc(db, 'sets', set.set_num), {
+      const ref = doc(db, 'users', userId, 'sets', set.set_num)
+      const existing = await getDoc(ref)
+      if (existing.exists()) {
+        // Already in collection — just navigate there
+        router.push(`/sets/${set.set_num}`)
+        return
+      }
+      await setDoc(ref, {
         name:       set.name,
         year:       set.year,
         totalParts: set.num_parts,
@@ -64,6 +85,7 @@ export default function AddSetPage() {
         status:     'active',
         addedAt:    serverTimestamp(),
       })
+      setOwnedSets(prev => new Set(Array.from(prev).concat(set.set_num)))
       router.push(`/sets/${set.set_num}`)
     } catch {
       setError('Failed to add set — please try again')
@@ -158,46 +180,58 @@ export default function AddSetPage() {
           <p className="section-label">
             {results.length} result{results.length !== 1 ? 's' : ''} — tap to add
           </p>
-          {results.map(set => (
-            <button
-              key={set.set_num}
-              onClick={() => addSet(set)}
-              disabled={!!adding}
-              className="card w-full text-left flex gap-4 items-center
-                         hover:shadow-card-hover transition-all
-                         active:scale-[0.98] disabled:opacity-50"
-            >
-              {/* Thumbnail */}
-              <div className="w-20 h-20 flex-shrink-0 rounded-xl bg-gray-50
-                              overflow-hidden flex items-center justify-center border border-gray-100">
-                {set.set_img_url
-                  ? <img src={set.set_img_url} alt={set.name}
-                         className="w-full h-full object-contain" />
-                  : <span className="text-3xl">🧱</span>
-                }
-              </div>
+          {results.map(set => {
+            const owned = ownedSets.has(set.set_num)
+            return (
+              <button
+                key={set.set_num}
+                onClick={() => addSet(set)}
+                disabled={!!adding}
+                className="card w-full text-left flex gap-4 items-center
+                           hover:shadow-card-hover transition-all
+                           active:scale-[0.98] disabled:opacity-50"
+              >
+                {/* Thumbnail */}
+                <div className="w-20 h-20 flex-shrink-0 rounded-xl bg-gray-50
+                                overflow-hidden flex items-center justify-center border border-gray-100">
+                  {set.set_img_url
+                    ? <img src={set.set_img_url} alt={set.name}
+                           className="w-full h-full object-contain" />
+                    : <span className="text-3xl">🧱</span>
+                  }
+                </div>
 
-              {/* Info */}
-              <div className="flex-1 min-w-0">
-                <p className="font-bold text-brand-900 leading-snug line-clamp-2">
-                  {set.name}
-                </p>
-                <p className="text-sm text-brand-900/40 mt-0.5">
-                  {set.set_num} · {set.year} · {set.num_parts.toLocaleString()} pcs
-                </p>
-              </div>
+                {/* Info */}
+                <div className="flex-1 min-w-0">
+                  <p className="font-bold text-brand-900 leading-snug line-clamp-2">
+                    {set.name}
+                  </p>
+                  <p className="text-sm text-brand-900/40 mt-0.5">
+                    {set.set_num} · {set.year} · {set.num_parts.toLocaleString()} pcs
+                  </p>
+                  {owned && (
+                    <span className="inline-block mt-1 text-[10px] font-bold uppercase
+                                     tracking-wide px-2 py-0.5 rounded-full
+                                     bg-green-100 text-green-700">
+                      ✓ In your collection
+                    </span>
+                  )}
+                </div>
 
-              {/* CTA */}
-              <div className="flex-shrink-0">
-                {adding === set.set_num ? (
-                  <span className="inline-block w-5 h-5 border-2 border-brand-500
-                                   border-t-transparent rounded-full animate-spin" />
-                ) : (
-                  <span className="text-brand-500 font-black text-lg">+</span>
-                )}
-              </div>
-            </button>
-          ))}
+                {/* CTA */}
+                <div className="flex-shrink-0">
+                  {adding === set.set_num ? (
+                    <span className="inline-block w-5 h-5 border-2 border-brand-500
+                                     border-t-transparent rounded-full animate-spin" />
+                  ) : owned ? (
+                    <span className="text-brand-900/20 text-xl">›</span>
+                  ) : (
+                    <span className="text-brand-500 font-black text-lg">+</span>
+                  )}
+                </div>
+              </button>
+            )
+          })}
         </div>
       )}
 

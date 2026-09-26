@@ -302,6 +302,7 @@ def rank_with_claude(query: str, sets: list) -> list:
             json={
                 'model': 'claude-haiku-4-5-20251001',
                 'max_tokens': 300,
+                'temperature': 0,   # same query → same ranking
                 'messages': [{'role': 'user', 'content': prompt}],
             },
             timeout=10,

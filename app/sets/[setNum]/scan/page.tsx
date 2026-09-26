@@ -1,216 +1,238 @@
 'use client'
-// build-fix
+
+/**
+ * Scan page — v4
+ *
+ * Architecture (see api/scan.py header for the full rationale):
+ *  - The phone downscales the image to ≤800px BEFORE upload (~80 KB, not MBs)
+ *  - /api/scan is a thin Claude proxy returning raw pieces only
+ *  - Checklist matching happens here (lib/matching.ts) — no checklist upload
+ *  - Bounding boxes are drawn as %-positioned overlays on the exact image
+ *    Claude analysed → always aligned, never cropped
+ */
 
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { collection, onSnapshot, doc, updateDoc, increment } from 'firebase/firestore'
 import { db } from '@/lib/firebase'
-import { useParams } from 'next/navigation'
+import { useParams, useSearchParams } from 'next/navigation'
 import type { ChecklistLine, ScanResult, Detection, DetectionStatus } from '@/lib/types'
+import {
+  matchDetections, summarize, buildCatalog, matchSingle,
+  type RawPiece, type BKCandidate, type SingleResult,
+} from '@/lib/matching'
+import { segmentBricks, type SegmentResult } from '@/lib/segment'
+import { dominantColour, foregroundFraction, frameSignature, signatureDiff } from '@/lib/colour'
 import Link from 'next/link'
+import { useAuth } from '../../../components/PasscodeGate'
 
 type ScanState = 'idle' | 'processing' | 'result' | 'error'
-type InputMode = 'camera' | 'photo'
+type InputMode = 'single' | 'photo'
 
-// ── API format helpers ───────────────────────────────────────────────────────
-
-function lineToApiFormat(l: ChecklistLine) {
-  return {
-    line_id:         l.lineId,
-    part_num:        l.partNum,
-    bricklink_ids:   l.bricklinkIds,
-    color_id:        l.colorId,
-    color_name:      l.colorName,
-    quantity_needed: l.quantityNeeded,
-    quantity_found:  l.quantityFound,
-  }
-}
-
-function mapDetection(d: Record<string, any>): Detection {
-  return {
-    partNum:    d.part_num    ) ?? null,
-    color:      d.color       ?? null,
-    name:       d.name        ?? null,
-    confidence: d.confidence  ?? 'none',
-    bboxPct:    d.bbox_pct    ?? [0, 0, 1, 1],
-    status:     d.status      ?? 'unknown',
-    checklistMatches: (d.checklist_matches ?? []).map((m: any) => ({
-      lineId:         m.line_id,
-      colorName:      m.color_name,
-      quantityNeeded: m.quantity_needed,
-      quantityFound:  m.quantity_found,
-    })),
-  }
-}
-
-// ── Status config ────────────────────────────────────────────────────────────
+// ── Status display config ────────────────────────────────────────────────────
 
 const STATUS_CONFIG: Record<DetectionStatus, {
-  dot: string; card: string; label: string
+  dot: string; card: string; label: string; box: string
 }> = {
-  needed:      { dot: 'bg-green-500',  card: 'border-green-200 bg-green-50',   label: 'Needed'       },
-  have_enough: { dot: 'bg-yellow-400', card: 'border-yellow-200 bg-yellow-50', label: 'Have enough'  },
-  wrong_color: { dot: 'bg-orange-400', card: 'border-orange-200 bg-orange-50', label: 'Wrong colour' },
-  not_in_set:  { dot: 'bg-gray-300',   card: 'border-gray-200',                label: 'Not in set'   },
-  unknown:     { dot: 'bg-red-500',    card: 'border-red-200 bg-red-50',       label: 'Unknown'      },
+  needed:      { dot: 'bg-green-500',  card: 'border-green-200 bg-green-50',   label: 'Needed',       box: '#22c55e' },
+  have_enough: { dot: 'bg-yellow-400', card: 'border-yellow-200 bg-yellow-50', label: 'Have enough',  box: '#eab308' },
+  wrong_color: { dot: 'bg-orange-400', card: 'border-orange-200 bg-orange-50', label: 'Wrong colour', box: '#fb923c' },
+  not_in_set:  { dot: 'bg-gray-300',   card: 'border-gray-200',                label: 'Not in set',   box: '#9ca3af' },
+  unknown:     { dot: 'bg-red-500',    card: 'border-red-200 bg-red-50',       label: 'Unknown',      box: '#ef4444' },
 }
 
 const CONFIDENCE_BADGE: Record<string, string> = {
   high: '', medium: '~', low: '?', none: '??',
 }
 
+// ── Client-side detection + downscaling (lib/segment.ts) ────────────────────
+
+interface Captured { dataUrl: string; b64: string }
+
+function segmentFile(file: File): Promise<SegmentResult> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+    img.onload = () => {
+      try { resolve(segmentBricks(img, img.naturalWidth, img.naturalHeight)) }
+      catch (e) { reject(e) }
+      finally { URL.revokeObjectURL(url) }
+    }
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not read that photo')) }
+    img.src = url
+  })
+}
+
 // ── Main component ───────────────────────────────────────────────────────────
 
 export default function ScanPage() {
-  const { setNum } = useParams<{ setNum: string }>()
-  const videoRef   = useRef<HTMLVideoElement>(null)
-  const canvasRef  = useRef<HTMLCanvasElement>(null)
-  const fileRef    = useRef<HTMLInputElement>(null)
-  const streamRef  = useRef<MediaStream | null>(null)
+  const { setNum }   = useParams<{ setNum: string }>()
+  const searchParams = useSearchParams()
+  const modeParam    = searchParams.get('mode')
+  const initialMode: InputMode = modeParam === 'photo' ? 'photo' : 'single'
+  const [inputMode] = useState<InputMode>(initialMode)
 
-  const [checklist,    setChecklist]   = useState<ChecklistLine[]>([])
-  const [inputMode,    setInputMode]   = useState<InputMode>('camera')
-  const [scanState,    setScanState]   = useState<ScanState>('idle')
-  const [result,       setResult]      = useState<ScanResult | null>(null)
-  const [errorMsg,     setErrorMsg]    = useState('')
-  const [cameraReady,  setCameraReady] = useState(false)
-  const [cameraError,  setCameraError] = useState('')
-  const [photoPreview, setPhotoPreview] = useState<string | null>(null)   // data-url for photo mode
-  const [photoB64,     setPhotoB64]    = useState<string | null>(null)    // raw b64 for API
+  const session  = useAuth()
+  const userId   = session?.userId ?? ''
+
+  const fileRef = useRef<HTMLInputElement>(null)
+
+  const [checklist, setChecklist] = useState<ChecklistLine[]>([])
+  const [scanState, setScanState] = useState<ScanState>('idle')
+  const [captured,  setCaptured]  = useState<Captured | null>(null)
+  const [result,    setResult]    = useState<ScanResult | null>(null)
+  const [errorMsg,  setErrorMsg]  = useState('')
+  const [elapsed,   setElapsed]   = useState(0)
 
   // Live checklist subscription
   useEffect(() => {
-    return onSnapshot(collection(db, 'sets', setNum, 'checklist'), snap => {
+    if (!userId) return
+    return onSnapshot(collection(db, 'users', userId, 'sets', setNum, 'checklist'), snap => {
       setChecklist(snap.docs.map(d => d.data() as ChecklistLine))
     })
-  }, [setNum])
+  }, [setNum, userId])
 
-  // Start camera when in camera mode
+  // Elapsed-seconds ticker while scanning
   useEffect(() => {
-    if (inputMode !== 'camera') return
-    let cancelled = false
+    if (scanState !== 'processing') { setElapsed(0); return }
+    const t0 = Date.now()
+    const id = setInterval(() => setElapsed(Math.round((Date.now() - t0) / 1000)), 1000)
+    return () => clearInterval(id)
+  }, [scanState])
 
-    async function startCamera() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
-          audio: false,
-        })
-        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return }
-        streamRef.current = stream
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream
-          setCameraReady(true)
+  // ── Scan logic ──
+
+  function buildFreeDetections(
+    seg: SegmentResult,
+    candidatesByIndex: Map<number, BKCandidate[]>,
+  ): Detection[] {
+    const counted = new Map<string, number>()
+    return seg.pieces.map((sp, idx) => {
+      const cands = candidatesByIndex.get(idx + 1) ?? []
+      const res   = matchSingle(cands, sp.rgb, checklist)
+      let status  = res.status
+      if (status === 'needed' && res.line) {
+        const extra = counted.get(res.line.lineId) ?? 0
+        if (res.line.quantityFound + extra >= res.line.quantityNeeded) {
+          status = 'have_enough'
+        } else {
+          counted.set(res.line.lineId, extra + 1)
         }
-      } catch {
-        if (!cancelled) setCameraError("Can't access camera — please allow camera permission and reload.")
       }
-    }
-
-    startCamera()
-    return () => {
-      cancelled = true
-      streamRef.current?.getTracks().forEach(t => t.stop())
-      setCameraReady(false)
-      setCameraError('')
-    }
-  }, [inputMode])
-
-  // Switch modes: stop camera, clear state
-  function switchMode(mode: InputMode) {
-    if (mode === inputMode) return
-    streamRef.current?.getTracks().forEach(t => t.stop())
-    streamRef.current = null
-    setCameraReady(false)
-    setCameraError('')
-    setPhotoPreview(null)
-    setPhotoB64(null)
-    setResult(null)
-    setScanState('idle')
-    setErrorMsg('')
-    setInputMode(mode)
+      const confidence =
+        res.score >= 0.4 ? 'high' : res.score >= 0.2 ? 'medium'
+        : res.partNum ? 'low' : 'none'
+      return {
+        partNum: res.partNum,
+        color:   res.line?.colorName ?? null,
+        name:    res.line?.partName ?? null,
+        confidence,
+        bboxPct: sp.bboxPct,
+        status,
+        checklistMatches: res.line ? [{
+          lineId:         res.line.lineId,
+          colorName:      res.line.colorName,
+          quantityNeeded: res.line.quantityNeeded,
+          quantityFound:  res.line.quantityFound,
+        }] : [],
+      } as Detection
+    })
   }
 
-  // ── Camera capture ──
-
-  function captureFrame(): string {
-    const v = videoRef.current!
-    const c = canvasRef.current!
-    c.width  = v.videoWidth
-    c.height = v.videoHeight
-    c.getContext('2d')!.drawImage(v, 0, 0)
-    return c.toDataURL('image/jpeg', 0.85).split(',')[1]
-  }
-
-  const handleCameraScan = useCallback(async () => {
-    if (!cameraReady) return
-    const b64 = captureFrame()
-    await runScan(b64)
-  }, [checklist, setNum, cameraReady])
-
-  // ── Photo file pick ──
-
-  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    if (!file) return
-    const reader = new FileReader()
-    reader.onload = ev => {
-      const dataUrl = ev.target?.result as string
-      setPhotoPreview(dataUrl)
-      setPhotoB64(dataUrl.split(',')[1])
-      setResult(null)
-      setScanState('idle')
-      setErrorMsg('')
-    }
-    reader.readAsDataURL(file)
-  }
-
-  async function handlePhotoScan() {
-    if (!photoB64) return
-    await runScan(photoB64)
-  }
-
-  // ── Shared scan logic ──
-
-  async function runScan(b64: string) {
+  const runScan = useCallback(async (seg: SegmentResult) => {
+    setCaptured(seg.display)
     setScanState('processing')
     setResult(null)
     setErrorMsg('')
 
-    try {
+    async function post(body: object) {
       const resp = await fetch('/api/scan', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          image_b64: b64,
-          checklist: checklist.map(lineToApiFormat),
-        }),
+        body:    JSON.stringify(body),
       })
-
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}))
         throw new Error(err.error || `Server error ${resp.status}`)
       }
+      return resp.json()
+    }
 
-      const data = await resp.json()
-      const scanResult: ScanResult = {
-        annotatedImageB64: data.annotated_image_b64,
-        detections: (data.detections ?? []).map(mapDetection),
-        summary: {
-          totalDetected: data.summary.total_detected,
-          needed:        data.summary.needed,
-          haveEnough:    data.summary.have_enough,
-          wrongColor:    data.summary.wrong_color  ?? 0,
-          notInSet:      data.summary.not_in_set,
-          unknown:       data.summary.unknown      ?? 0,
-        },
+    try {
+      let detections: Detection[]
+
+      if (seg.pieces.length > 0) {
+        const claudeDetections = async (indices: number[]): Promise<Map<number, Detection>> => {
+          const data = await post({
+            crops:   indices.map(i => seg.pieces[i].cropB64),
+            catalog: buildCatalog(checklist),
+          })
+          const byI = new Map<number, any>()
+          for (const p of (data.pieces ?? [])) byI.set(p.i, p)
+          const pieces: RawPiece[] = indices.map((origIdx, k) => {
+            const p = byI.get(k + 1)
+            return {
+              part_num:   p?.part_num ?? null,
+              color:      p?.color ?? null,
+              confidence: p?.confidence ?? 'none',
+              bbox_pct:   seg.pieces[origIdx].bboxPct,
+            }
+          })
+          const dets = matchDetections(pieces, checklist)
+          return new Map(indices.map((origIdx, k) => [origIdx, dets[k]]))
+        }
+
+        try {
+          const data = await post({ crops_free: seg.pieces.map(p => p.cropB64) })
+          const byIndex = new Map<number, BKCandidate[]>()
+          for (const r of (data.results ?? [])) byIndex.set(r.i, r.candidates ?? [])
+          const anyHit = Array.from(byIndex.values()).some(c => c.length > 0)
+          if (!anyHit) throw new Error('recogniser returned nothing')
+          detections = buildFreeDetections(seg, byIndex)
+
+          const weak = detections
+            .map((d, i) => ({ d, i }))
+            .filter(({ d }) =>
+              d.status === 'unknown' ||
+              (d.status === 'not_in_set' && d.confidence !== 'high'))
+            .map(({ i }) => i)
+          if (weak.length > 0) {
+            try {
+              const better = await claudeDetections(weak)
+              for (const [i, det] of Array.from(better.entries())) {
+                if (det) detections[i] = det
+              }
+            } catch {
+              // Claude unavailable / limit reached → keep the free results
+            }
+          }
+        } catch {
+          detections = Array.from(
+            (await claudeDetections(seg.pieces.map((_, i) => i))).values())
+        }
+      } else {
+        const data = await post({ image_b64: seg.display.b64 })
+        detections = matchDetections((data.pieces ?? []) as RawPiece[], checklist)
       }
 
+      const scanResult: ScanResult = { detections, summary: summarize(detections) }
       setResult(scanResult)
       setScanState('result')
-      await persistFinds(setNum, scanResult.detections)
+      await persistFinds(setNum, userId, detections)
 
     } catch (e: any) {
-      setErrorMsg(e.message ?? 'Scan failed └ please try again')
+      setErrorMsg(e.message ?? 'Scan failed — please try again')
+      setScanState('error')
+    }
+  }, [checklist, setNum, userId])
+
+  async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    try {
+      const seg = await segmentFile(file)
+      runScan(seg)
+    } catch (err: any) {
+      setErrorMsg(err.message ?? 'Could not read that photo')
       setScanState('error')
     }
   }
@@ -218,15 +240,10 @@ export default function ScanPage() {
   function scanAgain() {
     setScanState('idle')
     setResult(null)
+    setCaptured(null)
     setErrorMsg('')
-    if (inputMode === 'photo') {
-      setPhotoPreview(null)
-      setPhotoB64(null)
-      if (fileRef.current) fileRef.current.value = ''
-    }
+    if (fileRef.current) fileRef.current.value = ''
   }
-
-  // ── Render ──
 
   const isProcessing = scanState === 'processing'
 
@@ -236,213 +253,126 @@ export default function ScanPage() {
       {/* Header */}
       <div className="flex items-center gap-3 pt-1">
         <Link href={`/sets/${setNum}`} className="btn-ghost text-sm -ml-2">← Back</Link>
-        <h1 className="text-2xl font-black text-brand-900">Scan Bricks</h1>
+        <h1 className="text-2xl font-black text-brand-900">
+          {inputMode === 'single' ? '🧱 Single Brick' : '📷 Brick Pile'}
+        </h1>
       </div>
 
-      {/* Mode toggle */}
-      <div className="flex rounded-xl overflow-hidden border border-brand-900/10 bg-white">
-        {('camera', 'photo'] as InputMode[]).map(mode => (
-          <button
-            key={mode}
-            onClick={() => switchMode(mode)}
-            className={`flex-1 py-2.5 text-sm font-semibold transition-colors
-              ${inputMode === mode
-                ? 'bg-brand-900 text-white'
-                : 'text-brand-900/50 hover:text-brand-900'}`}
-          >
-            {mode === 'camera' ? '📹 Live Camera' : '📷 Take Photo'}
-          </button>
-        ))}
-      </div>
-
-      {/* Hidden canvas for frame capture */}
-      <canvas ref={canvasRef} className="hidden" />
-
-      {/* ─────── CAMERA MODE ─────── */}
-      {inputMode === 'camera' && (
-        <div className="relative rounded-2xl overflow-hidden bg-black"
-             style={{ aspectRatio: '4/3' }}>
-
-          {/* Live video */}
-          <video
-            ref={videoRef}
-            autoPlay
-            playsInline
-            muted
-            className={`w-full h-full object-cover transition-opacity duration-200
-                        ${scanState === 'result' ? 'opacity-0' : 'opacity-100'}`}
-          />
-
-          {/* Annotated result overlay */}
-          {scanState === 'result' && result?.annotatedImageB64 && (
-            <img
-              src={`data:image/jpeg;base64,${result.annotatedImageB64}`}
-              alt="Scan result"
-              className="absolute inset-0 w-full h-full object-cover"
-            />
-          )}
-
-          {/* Processing overlay */}
-          {isProcessing && (
-            <div className="absolute inset-0 bg-black/50 flex flex-col items-center justify-center gap-3">
-              <div className="w-14 h-14 border-4 border-white border-t-transparent
-                              rounded-full animate-spin" />
-              <p className="text-white font-semibold text-lg">Identifying bricks…</p>
-              <p className="text-white/60 text-sm">Usually 15–20 seconds</p>
-            </div>
-          )}
-
-          {/* Camera error */}
-          {cameraError && (
-            <div className="absolute inset-0 flex items-center justify-center bg-gray-900 p-6">
-              <div className="text-center space-y-3">
-                <p className="text-4xl">📷</p>
-                <p className="text-white text-sm font-medium">{cameraError}</p>
-              </div>
-            </div>
-          )}
-
-          {/* Shutter button */}
-          {scanState === 'idle' && cameraReady && !cameraError && (
-            <button
-              onClick={handleCameraScan}
-              aria-label="Scan"
-              className="absolute bottom-5 left-1/2 -translate-x-1/2 active:scale-90 transition-transform"
-              style={{ width: 72, height: 72 }}
-            >
-              <span className="absolute inset-0 rounded-full border-4 border-white opacity-80" />
-              <span className="absolute inset-2 rounded-full bg-white" />
-            </button>
-          )}
-
-          {/* Scan again pill */}
-          {scanState === 'result' && (
-            <button
-              onClick={scanAgain}
-              className="absolute bottom-4 left-1/2 -translate-x-1/2
-                         px-5 py-2.5 rounded-full bg-white/90 backdrop-blur-sm
-                         font-semibold text-brand-900 shadow-lg text-sm
-                         active:scale-95 transition-transform whitespace-nowrap"
-            >
-              📷 Scan Again
-            </button>
-          )}
-
-          {/* Checklist missing hint */}
-          {checklist.length === 0 && scanState === 'idle' && (
-            <div className="absolute top-3 left-3 right-3
-                            bg-lego-yellow/90 backdrop-blur-sm rounded-xl px-3 py-2">
-              <p className="text-xs font-semibold text-brand-900 text-center">
-                ⚠️ Load the parts list first —{' '}
-                <Link href={`/sets/${setNum}`} className="underline">go back</Link>
-              </p>
-            </div>
-          )}
+      {/* Checklist-missing warning */}
+      {checklist.length === 0 && (
+        <div className="bg-lego-yellow/90 rounded-xl px-4 py-3">
+          <p className="text-sm font-semibold text-brand-900 text-center">
+            ⚠️ Load the parts list first —{' '}
+            <Link href={`/sets/${setNum}`} className="underline">go back</Link>
+          </p>
         </div>
       )}
 
-      {/* ─────── PHOTO MODE ─────── */}
-      {inputMode === 'photo' && (
+      {/* Hidden file input (photo mode) */}
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        onChange={handleFileChange}
+        className="hidden"
+      />
+
+      {inputMode === 'photo' && scanState === 'idle' && (
+        <video src="/searching.mp4" preload="auto" muted playsInline
+               className="hidden" aria-hidden="true" />
+      )}
+
+      {/* ── SINGLE BRICK live scanner ── */}
+      {inputMode === 'single' && (
+        <SingleScanner checklist={checklist} setNum={setNum} userId={userId} />
+      )}
+
+      {/* ── PHOTO PICKER (photo mode, nothing captured yet) ── */}
+      {inputMode === 'photo' && !captured && scanState === 'idle' && (
+        <button
+          onClick={() => fileRef.current?.click()}
+          className="w-full rounded-2xl bg-brand-900 text-white
+                     flex flex-col items-center justify-center gap-3 py-10
+                     active:scale-[0.98] transition-transform shadow-md"
+        >
+          <span className="text-5xl">📷</span>
+          <div className="text-center">
+            <p className="font-black text-lg">Take a Photo</p>
+            <p className="text-sm text-white/60 mt-0.5">Spread bricks on a plain surface, then tap</p>
+          </div>
+        </button>
+      )}
+
+      {/* ── CAPTURED IMAGE + OVERLAY ── */}
+      {captured && (scanState === 'processing' || scanState === 'result') && (
         <div className="space-y-3">
-          {/* Hidden file input */}
-          <input
-            ref={fileRef}
-            type="file"
-            accept="image/*"
-            capture="environment"
-            onChange={handleFileChange}
-            className="hidden"
-          />
+          <div className="flex justify-center">
+            <div className="relative inline-block rounded-2xl overflow-hidden shadow-md">
+              <img
+                src={captured.dataUrl}
+                alt="Your bricks"
+                className="block max-w-full"
+                style={{ maxHeight: '55vh' }}
+              />
 
-          {!photoPreview ? (
-            /* Photo picker card */
-            <button
-              onClick={() => fileRef.current?.click()}
-              className="w-full rounded-2xl border-2 border-dashed border-brand-900/20
-                         bg-white flex flex-col items-center justify-center gap-3 py-16
-                         active:bg-brand-900/5 transition-colors"
-            >
-              <span className="text-5xl">📷</span>
-              <div className="text-center">
-                <p className="font-semibold text-brand-900">Take or upload a photo</p>
-                <p className="text-sm text-brand-900/50 mt-0.5">Spread bricks on a plain surface</p>
-              </div>
-            </button>
-          ) : (
-            /* Preview + scan */
-            <div className="space-y-3">
-              <div className="relative rounded-2xl overflow-hidden bg-black"
-                   style={{ aspectRatio: '4/3' }}>
-                <img
-                  src={scanState === 'result' && result?.annotatedImageB64
-                    ? `data:image/jpeg;base64,${result.annotatedImageB64}`
-                    : photoPreview}
-                  alt="Photo preview"
-                  className="w-full h-full object-cover"
-                />
-                {isProcessing && (
-                  <div className="absolute inset-0 bg-black/50 flex flex-col items-center justify-center gap-3">
-                    <div className="w-14 h-14 border-4 border-white border-t-transparent
-                                    rounded-full animate-spin" />
-                    <p className="text-white font-semibold text-lg">Identifying bricks…</p>
-                    <p className="text-white/60 text-sm">Usually 15–20 seconds</p>
+              {scanState === 'result' && result?.detections.map((d, i) => (
+                <BoundingBox key={i} detection={d} index={i} />
+              ))}
+
+              {isProcessing && (
+                <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center gap-4 px-6">
+                  <video
+                    src="/searching.mp4"
+                    autoPlay loop muted playsInline preload="auto"
+                    className="rounded-2xl shadow-lg border-2 border-white/20"
+                    style={{ width: '58%', maxWidth: 320 }}
+                  />
+                  <div className="text-center">
+                    <p className="text-white font-black text-xl leading-tight">
+                      🔍 Searching for clues…
+                    </p>
+                    <p className="text-white/70 text-base mt-1">
+                      {elapsed > 0 ? `${elapsed}s — ` : ''}usually 5–15 seconds
+                    </p>
                   </div>
-                )}
-              </div>
-
-              {scanState !== 'result' && (
-                <div className="flex gap-2">
-                  <button
-                    onClick={scanAgain}
-                    className="btn-ghost flex-1 py-3"
-                  >
-                    ← Retake
-                  </button>
-                  <button
-                    onClick={handlePhotoScan}
-                    disabled={isProcessing}
-                    className="btn-primary flex-1 py-3 disabled:opacity-50"
-                  >
-                    {isProcessing ? 'Scanning…' : '🔍 Scan Photo'}
-                  </button>
                 </div>
               )}
-
-              {scanState === 'result' && (
-                <button onClick={scanAgain} className="btn-primary w-full py-3">
-                  📷 Scan Another Photo
-                </button>
-              )}
             </div>
+          </div>
+
+          {scanState === 'result' && (
+            <button onClick={scanAgain} className="btn-primary w-full py-4 text-base">
+              📷 Scan Another Photo
+            </button>
           )}
         </div>
       )}
 
-      {/* Error message */}
+      {/* ── Error ── */}
       {scanState === 'error' && errorMsg && (
-        <div className="card border-red-200 bg-red-50 text-center py-4 space-y-2">
-          <p className="font-semibold text-red-700">{errorMsg}</p>
-          <button onClick={scanAgain} className="btn-primary px-8 text-sm">Try Again</button>
+        <div className="card border-red-200 bg-red-50 text-center py-5 space-y-3">
+          <p className="font-semibold text-red-700 text-base">{errorMsg}</p>
+          <button onClick={scanAgain} className="btn-primary px-8 py-3 text-base">Try Again</button>
         </div>
       )}
 
-      {/* ── Result panel ── */}
+      {/* ── Result summary ── */}
       {scanState === 'result' && result && (
         <div className="space-y-4">
 
-          {/* Summary stats */}
-          <div className="grid grid-cols-5 gap-2">
-            <StatCard count={result.summary.needed}     label="Needed"     dotClass="bg-green-500"  />
-            <StatCard count={result.summary.haveEnough} label="Enough"     dotClass="bg-yellow-400" />
-            <StatCard count={result.summary.wrongColor} label="Wrong clr"  dotClass="bg-orange-400" />
-            <StatCard count={result.summary.notInSet}   label="Not in set" dotClass="bg-gray-300"   />
-            <StatCard count={result.summary.unknown}    label="Unknown"    dotClass="bg-red-500"    />
+          <div className="grid grid-cols-5 gap-1.5">
+            <StatCard count={result.summary.needed}     label="Needed"   dotClass="bg-green-500"  />
+            <StatCard count={result.summary.haveEnough} label="Enough"   dotClass="bg-yellow-400" />
+            <StatCard count={result.summary.wrongColor} label="Colour"   dotClass="bg-orange-400" />
+            <StatCard count={result.summary.notInSet}   label="Not set"  dotClass="bg-gray-300"   />
+            <StatCard count={result.summary.unknown}    label="Unknown"  dotClass="bg-red-500"    />
           </div>
 
           {result.summary.unknown > 0 && (
             <div className="card border-red-200 bg-red-50 py-3 text-center">
               <p className="text-sm font-semibold text-red-700">
-                🔴 {result.summary.unknown} piece{result.summary.unknown !== 1 ? 's' : ''} couldn't be identified.
+                🔴 {result.summary.unknown} piece{result.summary.unknown !== 1 ? 's' : ''} couldn&apos;t be identified.
               </p>
               <p className="text-xs text-red-500 mt-0.5">Try a clearer photo or better lighting.</p>
             </div>
@@ -456,7 +386,7 @@ export default function ScanPage() {
           )}
 
           <Link href={`/sets/${setNum}/missing`}
-                className="btn-primary w-full text-center text-base py-3.5 block">
+                className="btn-primary w-full text-center text-base py-4 block">
             View Missing →
           </Link>
 
@@ -472,10 +402,14 @@ export default function ScanPage() {
                   const displayName = d.name
                     || (d.status === 'unknown' ? 'Could not identify' : d.partNum || '—')
                   return (
-                    <div key={i} className={`card flex items-center gap-3 py-2.5 ${cfg.card}`}>
-                      <span className={`w-3 h-3 rounded-full flex-shrink-0 ${cfg.dot}`} />
+                    <div key={i} className={`card flex items-center gap-3 py-3 ${cfg.card}`}>
+                      <span className="w-6 h-6 rounded-md flex-shrink-0 flex items-center justify-center
+                                       text-[11px] font-bold text-white"
+                            style={{ backgroundColor: cfg.box }}>
+                        {i + 1}
+                      </span>
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium truncate">
+                        <p className="text-sm font-semibold truncate">
                           {badge && <span className="text-xs font-bold text-gray-400 mr-1">{badge}</span>}
                           {displayName}
                         </p>
@@ -500,7 +434,7 @@ export default function ScanPage() {
           {result.detections.length === 0 && (
             <div className="card text-center py-8 space-y-2">
               <p className="text-3xl">🔍</p>
-              <p className="font-semibold text-brand-900/70">No pieces detected</p>
+              <p className="font-semibold text-brand-900/70 text-base">No pieces detected</p>
               <p className="text-sm text-brand-900/40">
                 Spread bricks further apart on a plain, well-lit surface.
               </p>
@@ -509,13 +443,13 @@ export default function ScanPage() {
         </div>
       )}
 
-      {/* Legend — idle camera state */}
-      {inputMode === 'camera' && scanState === 'idle' && (
+      {/* Legend — photo mode idle */}
+      {inputMode === 'photo' && scanState === 'idle' && (
         <div className="card py-3">
           <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-2 text-center">
             What the colours mean
           </p>
-          <div className="flex flex-wrap gap-2 justify-center">
+          <div className="flex flex-wrap gap-x-3 gap-y-1.5 justify-center">
             {(Object.entries(STATUS_CONFIG) as [DetectionStatus, typeof STATUS_CONFIG[DetectionStatus]][])
               .map(([status, cfg]) => (
                 <span key={status} className="flex items-center gap-1.5 text-xs text-brand-900/60">
@@ -530,7 +464,276 @@ export default function ScanPage() {
   )
 }
 
+// ── Single Brick live scanner ────────────────────────────────────────────────
+
+const SCAN_TICK_MS   = 650
+const COOLDOWN_MS    = 2200
+const STABLE_DIFF    = 8
+const NEW_SCENE_DIFF = 13
+const MIN_FG         = 0.05
+
+interface SingleShown {
+  res: SingleResult
+  displayName: string
+  colourName: string | null
+  ticked: boolean
+  lineId?: string
+}
+
+function SingleScanner({
+  checklist, setNum, userId,
+}: {
+  checklist: ChecklistLine[]
+  setNum: string
+  userId: string
+}) {
+  const videoRef     = useRef<HTMLVideoElement>(null)
+  const streamRef    = useRef<MediaStream | null>(null)
+  const busyRef      = useRef(false)
+  const prevSigRef   = useRef<Uint8Array | null>(null)
+  const lastScanRef  = useRef<Uint8Array | null>(null)
+  const cooldownRef  = useRef(0)
+  const checklistRef = useRef(checklist)
+  checklistRef.current = checklist
+
+  const [cameraError, setCameraError] = useState('')
+  const [identifying, setIdentifying] = useState(false)
+  const [shown, setShown]             = useState<SingleShown | null>(null)
+  const [session, setSession]         = useState({ needed: 0, enough: 0, wrong: 0, other: 0 })
+  const forceScanRef = useRef<(() => void) | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setInterval> | null = null
+
+    async function start() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 } },
+          audio: false,
+        })
+        if (cancelled) { stream.getTracks().forEach(t => t.stop()); return }
+        streamRef.current = stream
+        if (videoRef.current) videoRef.current.srcObject = stream
+        timer = setInterval(tick, SCAN_TICK_MS)
+      } catch {
+        if (!cancelled) setCameraError("Can't access camera — please allow camera permission and reload.")
+      }
+    }
+
+    function centerCrop(): HTMLCanvasElement | null {
+      const v = videoRef.current
+      if (!v || !v.videoWidth) return null
+      const side = 0.6 * Math.min(v.videoWidth, v.videoHeight)
+      const sx = (v.videoWidth - side) / 2, sy = (v.videoHeight - side) / 2
+      const c = document.createElement('canvas')
+      const out = Math.min(320, side)
+      c.width = out; c.height = out
+      c.getContext('2d')!.drawImage(v, sx, sy, side, side, 0, 0, out, out)
+      return c
+    }
+
+    async function tick(force = false) {
+      if (busyRef.current) return
+      const crop = centerCrop()
+      if (!crop) return
+
+      const sig = frameSignature(crop)
+      if (!force) {
+        const stable = signatureDiff(sig, prevSigRef.current) <= STABLE_DIFF
+        prevSigRef.current = sig
+        if (!stable) return
+        if (Date.now() < cooldownRef.current) return
+        if (foregroundFraction(crop) < MIN_FG) return
+        if (signatureDiff(sig, lastScanRef.current) <= NEW_SCENE_DIFF) return
+      }
+
+      busyRef.current = true
+      setIdentifying(true)
+      lastScanRef.current = sig
+
+      try {
+        const b64  = crop.toDataURL('image/jpeg', 0.85).split(',')[1]
+        const resp = await fetch('/api/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ crop: b64 }),
+        })
+        if (!resp.ok) throw new Error(`Server error ${resp.status}`)
+        const data = await resp.json()
+        const candidates = (data.candidates ?? []) as BKCandidate[]
+        const rgb = dominantColour(crop)
+        const res = matchSingle(candidates, rgb, checklistRef.current)
+
+        let ticked = false
+        if (res.status === 'needed' && res.line && userId) {
+          ticked = true
+          await updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', res.line.lineId), {
+            quantityFound: increment(1),
+          })
+        }
+
+        const displayName = res.line?.partName
+          || (res.partNum ? `Part ${res.partNum}` : 'Not recognised')
+        setShown({
+          res, displayName, ticked,
+          colourName: res.line?.colorName ?? null,
+          lineId: res.line?.lineId,
+        })
+        setSession(s => ({
+          needed: s.needed + (res.status === 'needed' ? 1 : 0),
+          enough: s.enough + (res.status === 'have_enough' ? 1 : 0),
+          wrong:  s.wrong  + (res.status === 'wrong_color' ? 1 : 0),
+          other:  s.other  + (['not_in_set', 'unknown'].includes(res.status) ? 1 : 0),
+        }))
+        cooldownRef.current = Date.now() + COOLDOWN_MS
+      } catch {
+        // transient network issue — just keep watching
+      } finally {
+        busyRef.current = false
+        setIdentifying(false)
+      }
+    }
+
+    forceScanRef.current = () => { tick(true) }
+    start()
+    return () => {
+      cancelled = true
+      forceScanRef.current = null
+      if (timer) clearInterval(timer)
+      streamRef.current?.getTracks().forEach(t => t.stop())
+    }
+  }, [setNum, userId])
+
+  async function undoTick() {
+    if (!shown?.ticked || !shown.lineId || !userId) return
+    const line = checklistRef.current.find(l => l.lineId === shown.lineId)
+    await updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', shown.lineId), {
+      quantityFound: Math.max(0, (line?.quantityFound ?? 1) - 1),
+    })
+    setShown({ ...shown, ticked: false })
+    setSession(s => ({ ...s, needed: Math.max(0, s.needed - 1) }))
+  }
+
+  const cfg = shown ? STATUS_CONFIG[shown.res.status] : null
+
+  return (
+    <div className="space-y-3">
+      {/* Camera + reticle */}
+      <div className="relative rounded-2xl overflow-hidden bg-black mx-auto flex justify-center">
+        <video ref={videoRef} autoPlay playsInline muted
+               className="block w-full object-contain" style={{ maxHeight: '48vh' }} />
+
+        {cameraError ? (
+          <div className="absolute inset-0 flex items-center justify-center bg-gray-900 p-6">
+            <div className="text-center space-y-3">
+              <p className="text-4xl">📷</p>
+              <p className="text-white text-base font-medium">{cameraError}</p>
+            </div>
+          </div>
+        ) : (
+          <>
+            <button
+              onClick={() => forceScanRef.current?.()}
+              aria-label="Scan now"
+              className="absolute inset-0 flex items-center justify-center"
+            >
+              <span className={`rounded-2xl border-4 border-dashed transition-colors block
+                                ${identifying ? 'border-lego-yellow' : 'border-white/70'}`}
+                    style={{ width: '52%', aspectRatio: '1/1', maxHeight: '80%' }} />
+            </button>
+            <div className="absolute bottom-3 left-0 right-0 flex justify-center pointer-events-none">
+              <span className="bg-black/60 text-white text-sm font-semibold px-4 py-1.5 rounded-full
+                               flex items-center gap-2">
+                {identifying && (
+                  <span className="inline-block w-3.5 h-3.5 border-2 border-lego-yellow
+                                   border-t-transparent rounded-full animate-spin" />
+                )}
+                {identifying ? 'Identifying…' : 'Hold one brick in the frame · tap to scan'}
+              </span>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Latest result */}
+      {shown && cfg && (
+        <div className={`card ${cfg.card} py-4`}>
+          <div className="flex items-center gap-3">
+            <span className="w-4 h-4 rounded-full flex-shrink-0"
+                  style={{ backgroundColor: cfg.box }} />
+            <div className="flex-1 min-w-0">
+              <p className="font-bold text-base leading-tight">
+                {cfg.label}{shown.ticked ? ' — added ✓' : ''}
+              </p>
+              <p className="text-sm text-brand-900/60 mt-0.5 truncate">
+                {shown.displayName}
+                {shown.colourName ? ` · ${shown.colourName}` : ''}
+                {shown.res.partNum ? ` · ${shown.res.partNum}` : ''}
+              </p>
+              {shown.res.line && (
+                <p className="text-xs text-brand-900/40 mt-0.5">
+                  {Math.min(shown.res.line.quantityFound + (shown.ticked ? 1 : 0),
+                            shown.res.line.quantityNeeded)}/{shown.res.line.quantityNeeded} found
+                </p>
+              )}
+            </div>
+            {shown.ticked && (
+              <button onClick={undoTick}
+                      className="text-xs font-bold text-red-500 border-2 border-red-200
+                                 rounded-full px-3 py-1.5 active:scale-95 transition-transform">
+                Undo
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Session tally */}
+      <div className="grid grid-cols-4 gap-1.5">
+        <StatCard count={session.needed} label="Needed"    dotClass="bg-green-500"  />
+        <StatCard count={session.enough} label="Enough"    dotClass="bg-yellow-400" />
+        <StatCard count={session.wrong}  label="Colour"    dotClass="bg-orange-400" />
+        <StatCard count={session.other}  label="Other"     dotClass="bg-gray-300"   />
+      </div>
+
+      <p className="text-xs text-brand-900/40 text-center px-4">
+        Hold each brick steady inside the frame — it identifies automatically,
+        ticks off needed parts, then waits for the next brick.
+      </p>
+    </div>
+  )
+}
+
 // ── Sub-components ───────────────────────────────────────────────────────────
+
+function BoundingBox({ detection: d, index }: { detection: Detection; index: number }) {
+  const [x1, y1, x2, y2] = d.bboxPct
+  const w = x2 - x1, h = y2 - y1
+  if (w <= 0 || h <= 0) return null
+  const color = STATUS_CONFIG[d.status].box
+  return (
+    <div
+      className="absolute rounded-sm pointer-events-none"
+      style={{
+        left:   `${x1 * 100}%`,
+        top:    `${y1 * 100}%`,
+        width:  `${w * 100}%`,
+        height: `${h * 100}%`,
+        border: `2.5px solid ${color}`,
+        boxShadow: '0 0 0 1px rgba(0,0,0,0.25)',
+      }}
+    >
+      <span
+        className="absolute -top-0.5 -left-0.5 -translate-y-full text-[11px] font-bold
+                   text-white px-1.5 py-0.5 rounded-t-sm leading-tight whitespace-nowrap"
+        style={{ backgroundColor: color }}
+      >
+        {index + 1}{d.partNum ? ` · ${d.partNum}` : ''}
+      </span>
+    </div>
+  )
+}
 
 function StatCard({
   count, label, dotClass
@@ -539,18 +742,20 @@ function StatCard({
     <div className="card text-center py-2.5 px-1">
       <div className="flex items-center justify-center gap-1 mb-0.5">
         <span className={`w-2 h-2 rounded-full ${dotClass}`} />
-        <p className="text-2xl font-bold text-brand-900">{count}</p>
+        <p className="text-xl font-bold text-brand-900">{count}</p>
       </div>
-      <p className="text-[10px] text-gray-400 leading-tight">{label}</p>
+      <p className="text-xs text-gray-400 leading-tight">{label}</p>
     </div>
   )
 }
 
 // ── Firestore persistence ────────────────────────────────────────────────────
 
-async function persistFinds(setNum: string, detections: Detection[]) {
+async function persistFinds(setNum: string, userId: string, detections: Detection[]) {
+  if (!userId) return
   const counts: Record<string, number> = {}
   for (const det of detections) {
+    if (det.confidence === 'low' || det.confidence === 'none') continue
     if (det.status === 'needed' && det.checklistMatches.length > 0) {
       const lineId = det.checklistMatches[0].lineId
       counts[lineId] = (counts[lineId] ?? 0) + 1
@@ -560,7 +765,7 @@ async function persistFinds(setNum: string, detections: Detection[]) {
 
   await Promise.all(
     Object.entries(counts).map(([lineId, count]) =>
-      updateDoc(doc(db, 'sets', setNum, 'checklist', lineId), {
+      updateDoc(doc(db, 'users', userId, 'sets', setNum, 'checklist', lineId), {
         quantityFound: increment(count),
       })
     )
