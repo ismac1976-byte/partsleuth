@@ -1,0 +1,93 @@
+name: repair-guard
+# Second lock on the repair bot's money rule (26 Sep 2026). The bot's shipping
+# step already refuses to push a change to prices, FX, valuations, portfolio or
+# tracker history or the corrections record without Iain's ✅ Approve. This
+# checks again from inside this repo, after the push: any commit by the bot
+# that touches a PROTECTED_PATHS entry must carry a "Repair-Approval:" line,
+# or it is reverted at once and Iain is told.
+#
+# Costs nothing on ordinary pushes: the job-level `if` skips before a runner
+# starts unless the push contains a repair-bot commit.
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+concurrency:
+  group: repair-guard
+  cancel-in-progress: false
+jobs:
+  guard:
+    if: contains(toJSON(github.event.commits.*.author.email), 'repair-bot@users.noreply.github.com')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50
+      - name: bot commits touching money maths must carry an approval
+        env:
+          REPAIR_BOT_TOKEN: ${{ secrets.REPAIR_BOT_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          COMMITS: ${{ toJSON(github.event.commits) }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, re, subprocess, urllib.request
+          repo = os.environ["GITHUB_REPOSITORY"].split("/")[-1].lower()
+          req = urllib.request.Request("https://api.github.com/repos/ismac1976-byte/repair-bot/contents/PROTECTED_PATHS",
+                                       headers={"Authorization": "Bearer " + os.environ["REPAIR_BOT_TOKEN"].strip()})
+          text = base64.b64decode(json.load(urllib.request.urlopen(req, timeout=20))["content"]).decode()
+          rules = []
+          for line in text.splitlines():
+              s = line.split("  #")[0].strip()
+              if not s or s.startswith("#"):
+                  continue
+              r, _, rest = s.partition(":")
+              path, _, keys = rest.partition("#")
+              if r.lower() == repo:
+                  rx = "^" + "".join(".*" if tok == "**" else "[^/]*" if tok == "*" else re.escape(tok)
+                                     for tok in re.split(r"(\*\*|\*)", path)) + "$"
+                  rules.append((re.compile(rx), [k for k in keys.split(",") if k]))
+          def show(ref, f):
+              r = subprocess.run(["git", "show", f"{ref}:{f}"], capture_output=True, text=True)
+              try:
+                  return json.loads(r.stdout) if r.returncode == 0 else None
+              except Exception:
+                  return "?"
+          bad = []
+          for c in json.loads(os.environ["COMMITS"]):
+              if (c.get("author") or {}).get("email") != "repair-bot@users.noreply.github.com":
+                  continue
+              if re.search(r"^Repair-Approval: [a-z0-9-]{6,40}$", c["message"], re.M):
+                  continue
+              files = subprocess.run(["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "--no-renames",
+                                      c["id"]], capture_output=True, text=True).stdout.split()
+              for f in files:
+                  for rx, keys in rules:
+                      if not rx.match(f):
+                          continue
+                      if keys:
+                          a, b = show(c["id"] + "^", f), show(c["id"], f)
+                          if isinstance(a, dict) and isinstance(b, dict) and all(a.get(k) == b.get(k) for k in keys):
+                              continue
+                      bad.append((c["id"], f))
+          if not bad:
+              print("repair-bot commits are within the rules")
+              raise SystemExit(0)
+          print("UNAPPROVED MONEY CHANGE:", bad)
+          subprocess.run(["git", "config", "user.name", "repair-guard"], check=True)
+          subprocess.run(["git", "config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
+          for sha in dict.fromkeys(reversed([s for s, _ in bad])):
+              subprocess.run(["git", "revert", "--no-edit", sha], check=True)
+          subprocess.run(["git", "push", "origin", "HEAD:main"], check=True)
+          tok, chat = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip(), os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+          if tok and chat:
+              msg = ("🛠️ 🚨 Needs you\n\nThe repair bot changed money maths without your approval "
+                     f"({', '.join(sorted({f for _, f in bad}))[:300]}). The safety lock caught it and has already "
+                     "undone it, so nothing is wrong now.\n\nWhat to do: next time you're at the Mac, ask Claude to "
+                     "check why the repair bot did this.\nHow urgent: not urgent - the change is already reversed.")
+              urllib.request.urlopen(urllib.request.Request(f"https://api.telegram.org/bot{tok}/sendMessage",
+                  data=json.dumps({"chat_id": chat, "text": msg}).encode(), headers={"Content-Type": "application/json"}), timeout=20)
+          raise SystemExit(1)
+          PY
